@@ -8,7 +8,7 @@
 
 **Sistema operativo proyectable mediante VNC en Termux/Android.**
 
-Vertil OS es un entorno de escritorio Linux completo que se ejecuta dentro de Termux (Android, sin root) utilizando proot-distro como base. Se construye incrementalmente por fases, garantizando que cada fase sea ejecutable y verificable visualmente antes de avanzar a la siguiente.
+Vertil OS es un entorno de escritorio Linux que se ejecuta dentro de Termux (Android, sin root) utilizando proot-distro como base. Se construye incrementalmente por fases, garantizando que cada fase sea ejecutable y verificable visualmente antes de avanzar a la siguiente.
 
 ---
 
@@ -16,23 +16,30 @@ Vertil OS es un entorno de escritorio Linux completo que se ejecuta dentro de Te
 
 Escritorio mínimo visible en VNC con Openbox, Tint2 y cursor funcional.
 
-## Instalación Rápida
+## Instalación y Uso
 
 ```bash
-# 1. Clona el repositorio
+# 1. Clona el repositorio en Termux
 git clone https://github.com/HackerCompagnion7/vertil-os.git
 cd vertil-os
 
-# 2. Ejecuta la construcción (solo la primera vez)
+# 2. Construye el sistema (SOLO en Termux)
 bash vertil-build.sh
 
-# 3. Inicia Vertil OS
-./vertil-start
+# 3. Inicia Vertil OS (dos opciones)
+
+# Opción A: Lanzador rápido (desde Termux)
+./vertil
+
+# Opción B: Manual (dos pasos)
+proot-distro login debian --bind ~/vertil-os:/root/vertil-os
+# Dentro de Debian:
+cd /root/vertil-os && ./vertil-start
 
 # 4. Conecta tu cliente VNC a localhost:5901
-#    Clientes recomendados: bVNC, RealVNC, MultiVNC
+#    (Recomendado: bVNC desde F-Droid)
 
-# 5. Para detener: Ctrl+C en la terminal de Termux
+# 5. Para detener: Ctrl+C
 ```
 
 ## Requisitos
@@ -42,34 +49,54 @@ bash vertil-build.sh
 - Al menos **2 GB** de almacenamiento libre para el rootfs de Debian
 - Conexión a internet para la primera instalación
 
-## Arquitectura
+## Arquitectura — Separación Estricta de Capas
 
 ```
-Termux (Android)
-└── proot-distro (Debian 12)
-    ├── Xvfb (display virtual X11, :0, 1280x720)
-    ├── Openbox (gestor de ventanas ultraligero)
-    ├── Tint2 (barra de tareas)
-    └── TigerVNC / x11vnc (servidor VNC, puerto 5901)
+CAPA TERMUX                          CAPA DEBIAN
+━━━━━━━━━━━━                         ━━━━━━━━━━━━
+vertil-build.sh                      vertil-start
+  • Instala proot-distro               • Inicia Xvfb
+  • Instala Debian                     • Inicia Openbox
+  • Instala paquetes                   • Inicia Tint2
+  • Instala configs                    • Inicia VNC
+  • Validacion: proot-distro list      • Validacion: ! $TERMUX_VERSION
+  • Guard: $TERMUX_VERSION             • Guard: ! proot-distro en PATH
+
+vertil (lanzador)
+  • proot-distro login
+  • --bind ~/vertil-os:/root/vertil-os
+  • ejecuta vertil-start
 ```
+
+**Regla fundamental:** Cada script pertenece a una capa. Nunca se mezclan.
 
 ## Estructura del Repositorio
 
 ```
 vertil-os/
-├── vertil-build.sh          # Script de instalación única (construye el rootfs)
-├── vertil-start             # Script de lanzamiento (inicia el sistema)
-├── configs/
-│   ├── openbox-rc.xml       # Configuración de Openbox (referencia)
-│   ├── openbox-menu.xml     # Menú contextual de Openbox (referencia)
-│   └── tint2rc              # Configuración de Tint2 (referencia)
+├── vertil-build.sh      # CAPA TERMUX — Bootstrap (instalacion unica)
+├── vertil-start         # CAPA DEBIAN — Runtime (inicio de servicios)
+├── vertil               # CAPA TERMUX — Lanzador rapido
+├── configs/             # Configuraciones de referencia
+│   ├── openbox-rc.xml
+│   ├── openbox-menu.xml
+│   └── tint2rc
 ├── docs/
-│   └── ROADMAP.md           # Hoja de ruta por fases
-├── README.md                # Este archivo
-└── LICENSE                  # GPL-3.0
+│   └── ROADMAP.md       # Hoja de ruta por fases
+└── README.md
 ```
 
-> **Nota:** Las configuraciones en `configs/` son copias de referencia. Los valores reales se embeben dentro de `vertil-build.sh` y se instalan automáticamente.
+## Reglas de Ejecución
+
+| Regla | Detalle |
+|-------|---------|
+| Debian instalado | Solo se valida con `proot-distro list` |
+| Entorno Termux | Solo válido si existe `$TERMUX_VERSION` |
+| Entorno Debian | Solo válido si NO existe `$TERMUX_VERSION` |
+| `$PREFIX` | Solo existe en Termux, no se usa en Debian |
+| proot-distro | Solo se ejecuta en Termux, NUNCA dentro de Debian |
+| "container already exists" | No es error, es estado válido |
+| Mensajes de consola | No son verdad verificable, solo exit codes |
 
 ## Lo que ves en VNC (Fase 1)
 
@@ -77,56 +104,42 @@ vertil-os/
 - ✅ Cursor del ratón funcional y responsive
 - ✅ Barra Tint2 en la parte inferior con reloj (formato 24h)
 - ✅ Botón de menú visible (esquina inferior izquierda)
-- ✅ Click derecho en el escritorio → menú contextual con "Terminal" y "Reiniciar Openbox"
+- ✅ Click derecho en el escritorio → menú con "Terminal" y "Reiniciar Openbox"
 - ✅ Alt+F4 para cerrar ventanas
 - ✅ Entorno estable sin crasheos
 
-## Características del Sistema
+## Solución de Problemas
 
-| Característica | Detalle |
-|---|---|
-| Display virtual | Xvfb en `:0`, 1280x720, 24-bit |
-| Gestor de ventanas | Openbox con configuración mínima |
-| Barra de tareas | Tint2 con reloj y botón de menú |
-| Servidor VNC | x0vncserver (fallback: x11vnc) |
-| Puerto VNC | 5901 (sin contraseña en Fase 1) |
-| Terminal | xterm |
-| Logging | `$HOME/.vertil/logs/` con timestamps |
-| PID tracking | `$HOME/.vertil/pids` |
-| Limpieza | Ordenada en Ctrl+C (SIGINT/SIGTERM) |
+### "No se detecto $TERMUX_VERSION"
+Estás dentro de Debian. Sal con `exit` y ejecuta desde Termux.
+
+### "Se detecto $TERMUX_VERSION" (en vertil-start)
+Estás en Termux, no en Debian. Entra a Debian primero:
+```bash
+proot-distro login debian --bind ~/vertil-os:/root/vertil-os
+```
+
+### "proot-distro detectado en PATH"
+vertil-start se está ejecutando en Termux en vez de Debian. Usa `./vertil` para lanzarlo correctamente.
+
+### "Debian no esta instalado"
+Ejecuta `bash vertil-build.sh` desde Termux.
 
 ## Roadmap
 
-| Fase | Nombre | Estado | Descripción |
-|------|--------|--------|-------------|
-| 1 | BASE VIVA | ✅ Completa | Escritorio mínimo visible en VNC |
-| 2 | IDENTIDAD VISUAL | 🔜 Pendiente | Logo, wallpaper, paleta verde/negro, rofi |
-| 3 | BOOT ANIMADO | 🔜 Pendiente | Pantalla de carga con progreso real |
-| 4 | ECOSISTEMA .VERTIL | 🔜 Pendiente | Formato de paquete propio, instalador gráfico |
-| 5 | PROTECCIÓN Y MARCA | 🔜 Pendiente | Guardian auto-regenerativo, watermark persistente |
+| Fase | Nombre | Estado |
+|------|--------|--------|
+| 1 | BASE VIVA | ✅ Completa |
+| 2 | IDENTIDAD VISUAL | 🔜 Pendiente |
+| 3 | BOOT ANIMADO | 🔜 Pendiente |
+| 4 | ECOSISTEMA .VERTIL | 🔜 Pendiente |
+| 5 | PROTECCIÓN Y MARCA | 🔜 Pendiente |
 
-Ver [docs/ROADMAP.md](docs/ROADMAP.md) para detalles completos de cada fase.
-
-## Solución de Problemas
-
-### "No se encontro el rootfs de Debian"
-Ejecuta `bash vertil-build.sh` primero para crear el rootfs.
-
-### El escritorio no aparece en VNC
-1. Verifica que `vertil-start` se esté ejecutando sin errores
-2. Revisa los logs en `$HOME/.vertil/logs/`
-3. Asegúrate de conectarte al puerto correcto (5901)
-
-### La conexión VNC se rechaza
-- Confirma que no hay otra instancia de Vertil OS ejecutándose
-- Verifica que el puerto 5901 no esté en uso por otra aplicación
-
-### Tint2 no aparece
-Tint2 es no-crítico en Fase 1. Si no se muestra, el escritorio sigue funcional. Revisa `~/.vertil/logs/tint2.log` para detalles.
+Ver [docs/ROADMAP.md](docs/ROADMAP.md) para detalles completos.
 
 ## Licencia
 
-Este proyecto está licenciado bajo la [GNU General Public License v3.0](LICENSE).
+[GNU General Public License v3.0](LICENSE)
 
 ---
 
