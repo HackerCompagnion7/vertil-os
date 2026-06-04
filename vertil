@@ -93,7 +93,8 @@ echo "  Iniciando Vertil OS..."
 echo "  Directorio: ${REPO_DIR}"
 echo ""
 
-# Entrar a Debian con el repositorio montado y ejecutar vertil-start
+# Entrar a Debian con el repositorio montado
+# chmod +x obligatorio: bind mount no preserva permisos de ejecucion
 proot-distro login debian \
     --bind "${REPO_DIR}":/root/vertil-os \
-    -- bash -c "cd /root/vertil-os && ./vertil-start"
+    -- bash -c "chmod +x /root/vertil-os/vertil-start && cd /root/vertil-os && ./vertil-start"

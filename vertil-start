@@ -6,6 +6,8 @@
 # PROPOSITO: Iniciar Xvfb, Openbox, Tint2 y VNC
 # REGLA: Solo se ejecuta en Debian/proot. Aborta si detecta Termux.
 # PROHIBIDO: proot-distro, $PREFIX, variables de Termux
+# PROHIBIDO: x0vncserver (incompatible con Xvfb)
+# VNC: Solo x11vnc (compatible con display virtual Xvfb)
 # ============================================================
 
 set -eo pipefail
@@ -14,7 +16,7 @@ set -eo pipefail
 # 1. VERIFICACION DE ENTORNO — DEBIAN OBLIGATORIO
 # ============================================================
 
-# Regla: Solo válido si NO existe $TERMUX_VERSION
+# Regla: Solo valido si NO existe $TERMUX_VERSION
 if [ -n "${TERMUX_VERSION:-}" ]; then
     echo ""
     echo "  ERROR: Se detecto \$TERMUX_VERSION."
@@ -30,7 +32,6 @@ if [ -n "${TERMUX_VERSION:-}" ]; then
 fi
 
 # REGLA CRITICA: SI entorno == Debian Y proot-distro en ejecucion → ABORTAR
-# OUTPUT: [BLOCKED] proot-distro dentro de Debian
 if command -v proot-distro &>/dev/null; then
     echo "[BLOCKED] proot-distro dentro de Debian"
     exit 1
@@ -38,7 +39,7 @@ fi
 
 # Verificar que estamos en un entorno Linux con los binarios necesarios
 CRITICAL_MISSING=""
-for cmd in Xvfb openbox xterm; do
+for cmd in Xvfb openbox xterm x11vnc; do
     if ! command -v "$cmd" &>/dev/null; then
         CRITICAL_MISSING="${CRITICAL_MISSING} ${cmd}"
     fi
@@ -48,16 +49,6 @@ if [ -n "${CRITICAL_MISSING}" ]; then
     echo ""
     echo "  ERROR: Faltan comandos criticos:${CRITICAL_MISSING}"
     echo "  Los paquetes no se instalaron correctamente."
-    echo "  Ejecuta desde Termux: bash vertil-build.sh"
-    echo ""
-    exit 1
-fi
-
-# Verificar que al menos un servidor VNC existe
-if ! command -v x0vncserver &>/dev/null && ! command -v x11vnc &>/dev/null; then
-    echo ""
-    echo "  ERROR: No se encontro ningun servidor VNC."
-    echo "  Se necesita x0vncserver o x11vnc."
     echo "  Ejecuta desde Termux: bash vertil-build.sh"
     echo ""
     exit 1
@@ -130,7 +121,6 @@ cleanup() {
 
     # Limpieza residual
     pkill -f "Xvfb" 2>/dev/null || true
-    pkill -f "x0vncserver" 2>/dev/null || true
     pkill -f "x11vnc" 2>/dev/null || true
     pkill -f "openbox" 2>/dev/null || true
     pkill -f "tint2" 2>/dev/null || true
@@ -226,63 +216,33 @@ fi
 
 # ============================================================
 # 11. INICIAR SERVIDOR VNC
-#    x0vncserver primero, x11vnc como fallback.
-#    Solo exit code != 0 es error.
+#    UNICO BACKEND: x11vnc
+#    x0vncserver ELIMINADO — incompatible con Xvfb (display virtual)
+#    x11vnc es compatible con Xvfb (comparte display existente)
 # ============================================================
-VNC_STARTED=false
+info "Iniciando x11vnc en puerto ${VNC_PORT}..."
 
-# Intento 1: x0vncserver (TigerVNC)
-if command -v x0vncserver &>/dev/null; then
-    info "Iniciando x0vncserver en puerto ${VNC_PORT}..."
+x11vnc \
+    -display "${DISPLAY_NUM}" \
+    -rfbport "${VNC_PORT}" \
+    -nopw \
+    -forever \
+    -shared \
+    -noxrecord \
+    -noxdamage \
+    >> "${LOG_DIR}/vnc.log" 2>&1 &
+VNC_PID=$!
+echo "VNC:${VNC_PID}" >> "${PID_FILE}"
 
-    x0vncserver \
-        -display "${DISPLAY_NUM}" \
-        -rfbport "${VNC_PORT}" \
-        -SecurityTypes None \
-        >> "${LOG_DIR}/vnc.log" 2>&1 &
-    VNC_PID=$!
-    echo "VNC:${VNC_PID}" >> "${PID_FILE}"
+sleep 2
 
-    sleep 2
-    if kill -0 "${VNC_PID}" 2>/dev/null; then
-        info "x0vncserver iniciado (PID ${VNC_PID})"
-        VNC_STARTED=true
-    else
-        info "x0vncserver no respondio. Intentando x11vnc..."
-        sed -i "/^VNC:/d" "${PID_FILE}"
-    fi
-fi
-
-# Intento 2: x11vnc (fallback)
-if [ "${VNC_STARTED}" = "false" ] && command -v x11vnc &>/dev/null; then
-    info "Iniciando x11vnc en puerto ${VNC_PORT}..."
-
-    x11vnc \
-        -display "${DISPLAY_NUM}" \
-        -rfbport "${VNC_PORT}" \
-        -nopw \
-        -forever \
-        -shared \
-        -noxrecord \
-        -noxdamage \
-        >> "${LOG_DIR}/vnc.log" 2>&1 &
-    VNC_PID=$!
-    echo "VNC:${VNC_PID}" >> "${PID_FILE}"
-
-    sleep 2
-    if kill -0 "${VNC_PID}" 2>/dev/null; then
-        info "x11vnc iniciado (PID ${VNC_PID})"
-        VNC_STARTED=true
-    fi
-fi
-
-# Verificacion final: ALGUN servidor VNC debe estar corriendo
-if [ "${VNC_STARTED}" = "false" ]; then
-    error "Ningun servidor VNC pudo iniciarse."
-    error "Ver ${LOG_DIR}/vnc.log para detalles."
+if ! kill -0 "${VNC_PID}" 2>/dev/null; then
+    error "x11vnc no pudo iniciarse. Ver ${LOG_DIR}/vnc.log"
     cleanup
     exit 1
 fi
+
+info "x11vnc iniciado (PID ${VNC_PID})"
 
 # ============================================================
 # 12. FLAG DE LISTO
@@ -318,6 +278,7 @@ echo -e "${GREEN}  |                                          |${NC}"
 echo -e "${GREEN}  |  VNC: ${BOLD}${LOCAL_IP}:${VNC_PORT}${NC}                      "
 echo -e "${GREEN}  |  Display: ${BOLD}${DISPLAY_NUM}${NC}                       "
 echo -e "${GREEN}  |  Resolucion: 1280x720                   |${NC}"
+echo -e "${GREEN}  |  Backend: x11vnc                        |${NC}"
 echo -e "${GREEN}  |  Seguridad: Ninguna (Fase 1)            |${NC}"
 echo -e "${GREEN}  |                                          |${NC}"
 echo -e "${GREEN}  |  Presione ${BOLD}Ctrl+C${NC} para detener            "
@@ -355,19 +316,14 @@ while true; do
     # VNC — auto-reinicio con x11vnc
     if ! kill -0 "${VNC_PID}" 2>/dev/null; then
         info "VNC ha muerto. Reiniciando..."
-        if command -v x11vnc &>/dev/null; then
-            x11vnc \
-                -display "${DISPLAY_NUM}" \
-                -rfbport "${VNC_PORT}" \
-                -nopw -forever -shared -noxrecord -noxdamage \
-                >> "${LOG_DIR}/vnc.log" 2>&1 &
-            VNC_PID=$!
-            sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${PID_FILE}"
-            sleep 1
-        else
-            error "VNC murio y x11vnc no disponible. Deteniendo."
-            break
-        fi
+        x11vnc \
+            -display "${DISPLAY_NUM}" \
+            -rfbport "${VNC_PORT}" \
+            -nopw -forever -shared -noxrecord -noxdamage \
+            >> "${LOG_DIR}/vnc.log" 2>&1 &
+        VNC_PID=$!
+        sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${PID_FILE}"
+        sleep 1
     fi
 
     # Tint2 — auto-reinicio (no critico)
