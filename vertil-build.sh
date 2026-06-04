@@ -172,6 +172,7 @@ proot-distro login debian -- bash -c '
         openbox \
         tigervnc-standalone-server \
         x11vnc \
+        x11-utils \
         xfonts-base \
         tint2 \
         xterm \

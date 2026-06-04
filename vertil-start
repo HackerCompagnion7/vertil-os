@@ -171,9 +171,21 @@ fi
 info "Xvfb iniciado (PID ${XVFB_PID})"
 
 # ============================================================
-# 8. ESTABLECER DISPLAY
+# 8. ESTABLECER DISPLAY Y VERIFICAR
 # ============================================================
 export DISPLAY="${DISPLAY_NUM}"
+
+# Verificar que el display responde
+if command -v xdpyinfo &>/dev/null; then
+    if ! xdpyinfo -display "${DISPLAY_NUM}" &>/dev/null; then
+        error "Display ${DISPLAY_NUM} no responde. Xvfb pudo no haber iniciado correctamente."
+        cleanup
+        exit 1
+    fi
+    info "Display ${DISPLAY_NUM} verificado con xdpyinfo."
+else
+    warn "xdpyinfo no disponible, saltando verificacion de display."
+fi
 
 # ============================================================
 # 9. INICIAR Openbox
@@ -230,8 +242,12 @@ x11vnc \
     -nopw \
     -forever \
     -shared \
+    -noshm \
+    -no6 \
     -noxrecord \
     -noxdamage \
+    -nowf \
+    -nowcr \
     >> "${LOG_DIR}/vnc.log" 2>&1 &
 VNC_PID=$!
 echo "VNC:${VNC_PID}" >> "${PID_FILE}"
@@ -240,6 +256,9 @@ sleep 2
 
 if ! kill -0 "${VNC_PID}" 2>/dev/null; then
     error "x11vnc no pudo iniciarse. Ver ${LOG_DIR}/vnc.log"
+    echo "  --- Ultimas lineas de vnc.log ---"
+    tail -20 "${LOG_DIR}/vnc.log" 2>/dev/null || echo "  (log no disponible)"
+    echo "  --- Fin ---"
     cleanup
     exit 1
 fi
@@ -321,7 +340,7 @@ while true; do
         x11vnc \
             -display "${DISPLAY_NUM}" \
             -rfbport "${VNC_PORT}" \
-            -nopw -forever -shared -noxrecord -noxdamage \
+            -nopw -forever -shared -noshm -no6 -noxrecord -noxdamage -nowf -nowcr \
             >> "${LOG_DIR}/vnc.log" 2>&1 &
         VNC_PID=$!
         sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${PID_FILE}"
