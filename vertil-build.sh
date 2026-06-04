@@ -5,7 +5,7 @@
 # CAPA: TERMUX (obligatorio)
 # PROPOSITO: Instalar Debian + paquetes + configuraciones
 # REGLA: Solo se ejecuta en Termux. Aborta si detecta Debian.
-# VALIDACION: Debian instalado SOLO via `proot-distro list`
+# VALIDACION: Debian instalado via proot-distro (multiples metodos)
 # ============================================================
 
 set -eo pipefail
@@ -14,22 +14,17 @@ set -eo pipefail
 # 1. VERIFICACION DE ENTORNO — TERMUX OBLIGATORIO
 # ============================================================
 
-# Regla: Solo valido si existe $TERMUX_VERSION
 if [ -z "${TERMUX_VERSION:-}" ]; then
     echo ""
     echo "  ERROR: No se detecto \$TERMUX_VERSION."
     echo "  Este script SOLO se ejecuta en Termux."
     echo ""
-    echo "  Si estas dentro de Debian, sal con:"
-    echo "    exit"
-    echo ""
-    echo "  Luego ejecuta desde Termux:"
-    echo "    bash vertil-build.sh"
+    echo "  Si estas dentro de Debian, sal con: exit"
+    echo "  Luego ejecuta desde Termux: bash vertil-build.sh"
     echo ""
     exit 1
 fi
 
-# Defensivo: defaults para variables que siempre existen en Termux
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME="${HOME:-/data/data/com.termux/files/home}"
 
@@ -43,31 +38,57 @@ echo ""
 
 # ============================================================
 # 2. FUNCION: Verificar si Debian esta instalado
-#    Metodo UNICO: proot-distro list
-#    Maneja todos los formatos de salida conocidos:
-#      - "debian [installed]" en la misma linea
-#      - Seccion "Installed distributions:" + "debian" en linea aparte
-#      - "status: installed" debajo de "debian"
+#    Estrategia multi-metodo para manejar TODOS los formatos
+#    conocidos de `proot-distro list`:
+#
+#    Formato A: "  debian [installed]" en la misma linea
+#    Formato B: Seccion "Installed distributions:" + "debian" aparte
+#    Formato C: "  debian (12) [installed]" con version
+#    Formato D: Cualquier otro formato (fallback a login)
 # ============================================================
 
 debian_is_installed() {
-    local list_output
-    list_output=$(proot-distro list 2>/dev/null) || return 1
+    local output
 
-    # Formato 1: "debian [installed]" o "debian - installed" en la misma linea
-    if echo "$list_output" | grep -i "debian" | grep -qi "installed"; then
+    # Capturar salida de proot-distro list (stdout + stderr)
+    output=$(proot-distro list 2>&1) || true
+
+    # Eliminar codigos ANSI (colores de terminal)
+    output=$(printf '%s' "$output" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+
+    # Guardar output para debug (visible si la validacion falla)
+    printf '%s\n' "$output" > "${HOME}/.vertil-debug-proot-list.txt" 2>/dev/null || true
+
+    # --- Metodo 1: "debian" con "[installed]" o "installed" en la misma linea ---
+    # Formato: "  debian [installed]" o "  debian (12) [installed]"
+    if printf '%s\n' "$output" | grep -i "debian" | grep -qi "install"; then
         return 0
     fi
 
-    # Formato 2: Seccion "Installed distributions:" seguida de "debian"
-    # proot-distro list muestra "Installed distributions:" como encabezado
-    # y debajo lista los nombres, uno por linea
-    if echo "$list_output" | sed -n '/Installed/,${p}' | grep -q "debian"; then
+    # --- Metodo 2: Contar cuantas veces aparece "debian" ---
+    # Si esta instalado, aparece en "Supported" Y en "Installed" → 2+ veces
+    # Si NO esta instalado, solo aparece en "Supported" → 1 vez
+    local count
+    count=$(printf '%s\n' "$output" | grep -ci "debian" 2>/dev/null || true)
+    count=$(echo "$count" | tr -cd '0-9')
+    if [ "${count:-0}" -ge 2 ]; then
         return 0
     fi
 
-    # Formato 3: "debian" en una linea y "installed" en la siguiente
-    if echo "$list_output" | grep -A1 "debian" | grep -qi "installed"; then
+    # --- Metodo 3: Seccion "Installed distributions:" con "debian" debajo ---
+    # Usar awk: busca la linea "Installed" y luego "debian" despues
+    if printf '%s\n' "$output" | awk '
+        /[Ii]nstalled.*:/ { in_installed=1; next }
+        /^[A-Z]/ { in_installed=0 }
+        in_installed && /debian/ { exit 0 }
+        END { exit 1 }
+    ' 2>/dev/null; then
+        return 0
+    fi
+
+    # --- Metodo 4: Login test (DEFINITIVO - si puedes entrar, esta instalado) ---
+    # Este es el test mas confiable que existe
+    if proot-distro login debian -- true 2>/dev/null; then
         return 0
     fi
 
@@ -84,7 +105,6 @@ if ! command -v proot-distro &>/dev/null; then
     pkg install -y proot-distro
 fi
 
-# Validar que realmente se instalo (verificacion con comando real)
 if ! command -v proot-distro &>/dev/null; then
     echo "  ERROR: proot-distro no se pudo instalar."
     exit 1
@@ -94,7 +114,7 @@ echo "       proot-distro disponible."
 
 # ============================================================
 # 4. VERIFICAR/INSTALAR DEBIAN
-#    VALIDACION SOLO con `proot-distro list`
+#    VALIDACION con debian_is_installed() (multiples metodos)
 #    "container already exists" NO es error.
 # ============================================================
 echo "[2/6] Verificando Debian..."
@@ -104,15 +124,15 @@ if debian_is_installed; then
 else
     echo "       Instalando Debian (puede tardar varios minutos)..."
 
-    # Ejecutar instalacion
-    # "container already exists" no es error — se ignora
+    # Ejecutar instalacion - "container already exists" no es error
     proot-distro install debian || {
-        # Verificar si fallo realmente o si ya existia
         if debian_is_installed; then
             echo "       Debian ya existia (no es error). Continuando..."
         else
+            echo ""
             echo "  ERROR: La instalacion de Debian fallo."
             echo "  Intenta manualmente: proot-distro install debian"
+            echo ""
             exit 1
         fi
     }
@@ -121,15 +141,23 @@ else
     if debian_is_installed; then
         echo "       Debian instalado correctamente."
     else
-        echo "  ERROR: Debian no aparece como instalado en proot-distro list."
-        echo "  Intenta manualmente: proot-distro install debian"
+        echo ""
+        echo "  ERROR: Debian se instalo pero la validacion falla."
+        echo "  Esto puede ser un bug en el formato de proot-distro list."
+        echo ""
+        echo "  DEBUG: Salida de proot-distro list:"
+        cat "${HOME}/.vertil-debug-proot-list.txt" 2>/dev/null || echo "  (no se pudo leer el archivo de debug)"
+        echo ""
+        echo "  Intenta manualmente:"
+        echo "    proot-distro list"
+        echo "    proot-distro login debian -- echo ok"
+        echo ""
         exit 1
     fi
 fi
 
 # ============================================================
 # 5. INSTALAR PAQUETES DENTRO DE DEBIAN
-#    Solo exit code != 0 es error real.
 # ============================================================
 echo "[3/6] Instalando paquetes en Debian..."
 echo "       (Esto puede tardar la primera vez)"
@@ -155,7 +183,6 @@ proot-distro login debian -- bash -c '
 '
 
 # Verificar que los paquetes criticos se instalaron
-# Usamos proot-distro login para verificar DENTRO de Debian
 echo "       Verificando paquetes instalados..."
 
 PKG_CHECK=$(proot-distro login debian -- bash -c '
@@ -182,7 +209,6 @@ fi
 
 # ============================================================
 # 6. INSTALAR CONFIGURACIONES DENTRO DE DEBIAN
-#    Se escriben via proot-distro login, NO via rutas directas.
 # ============================================================
 echo "[4/6] Instalando configuraciones..."
 
@@ -370,7 +396,7 @@ DESKTOPMENU
     echo "CONFIGS_INSTALADAS=1"
 '
 
-# Verificar que las configs se instalaron (verificacion con comando real)
+# Verificar que las configs se instalaron
 CONFIG_CHECK=$(proot-distro login debian -- bash -c '
     OK=true
     [ -f /root/.config/openbox/rc.xml ] || OK=false
@@ -402,9 +428,12 @@ fi
 # ============================================================
 echo "[6/6] Verificacion final..."
 
-# Verificacion final: Debian sigue instalado
 if ! debian_is_installed; then
     echo "  ERROR: Debian no aparece como instalado. Algo salio mal."
+    echo ""
+    echo "  DEBUG: Salida de proot-distro list:"
+    cat "${HOME}/.vertil-debug-proot-list.txt" 2>/dev/null || echo "  (no disponible)"
+    echo ""
     exit 1
 fi
 

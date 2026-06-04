@@ -22,26 +22,43 @@ HOME="${HOME:-/data/data/com.termux/files/home}"
 
 # ============================================================
 # FUNCION: Verificar si Debian esta instalado
-#    Metodo UNICO: proot-distro list
-#    Maneja todos los formatos de salida conocidos
+#    Multi-metodo: proot-distro list + login fallback
 # ============================================================
 
 debian_is_installed() {
-    local list_output
-    list_output=$(proot-distro list 2>/dev/null) || return 1
+    local output
 
-    # Formato 1: "debian [installed]" o "debian - installed" en la misma linea
-    if echo "$list_output" | grep -i "debian" | grep -qi "installed"; then
+    # Capturar salida de proot-distro list (stdout + stderr)
+    output=$(proot-distro list 2>&1) || true
+
+    # Eliminar codigos ANSI
+    output=$(printf '%s' "$output" | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g')
+
+    # Metodo 1: "debian" con "install" en la misma linea
+    if printf '%s\n' "$output" | grep -i "debian" | grep -qi "install"; then
         return 0
     fi
 
-    # Formato 2: Seccion "Installed distributions:" seguida de "debian"
-    if echo "$list_output" | sed -n '/Installed/,${p}' | grep -q "debian"; then
+    # Metodo 2: Contar ocurrencias de "debian" (2+ = instalado)
+    local count
+    count=$(printf '%s\n' "$output" | grep -ci "debian" 2>/dev/null || true)
+    count=$(echo "$count" | tr -cd '0-9')
+    if [ "${count:-0}" -ge 2 ]; then
         return 0
     fi
 
-    # Formato 3: "debian" en una linea y "installed" en la siguiente
-    if echo "$list_output" | grep -A1 "debian" | grep -qi "installed"; then
+    # Metodo 3: Seccion "Installed distributions:" con "debian"
+    if printf '%s\n' "$output" | awk '
+        /[Ii]nstalled.*:/ { in_installed=1; next }
+        /^[A-Z]/ { in_installed=0 }
+        in_installed && /debian/ { exit 0 }
+        END { exit 1 }
+    ' 2>/dev/null; then
+        return 0
+    fi
+
+    # Metodo 4: Login test (definitivo)
+    if proot-distro login debian -- true 2>/dev/null; then
         return 0
     fi
 
