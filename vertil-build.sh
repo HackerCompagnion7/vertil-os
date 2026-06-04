@@ -14,7 +14,7 @@ set -eo pipefail
 # 1. VERIFICACION DE ENTORNO — TERMUX OBLIGATORIO
 # ============================================================
 
-# Regla: Solo válido si existe $TERMUX_VERSION
+# Regla: Solo valido si existe $TERMUX_VERSION
 if [ -z "${TERMUX_VERSION:-}" ]; then
     echo ""
     echo "  ERROR: No se detecto \$TERMUX_VERSION."
@@ -42,7 +42,40 @@ echo "  Entorno: Termux (verificado)"
 echo ""
 
 # ============================================================
-# 2. INSTALAR PROOT-DISTRO
+# 2. FUNCION: Verificar si Debian esta instalado
+#    Metodo UNICO: proot-distro list
+#    Maneja todos los formatos de salida conocidos:
+#      - "debian [installed]" en la misma linea
+#      - Seccion "Installed distributions:" + "debian" en linea aparte
+#      - "status: installed" debajo de "debian"
+# ============================================================
+
+debian_is_installed() {
+    local list_output
+    list_output=$(proot-distro list 2>/dev/null) || return 1
+
+    # Formato 1: "debian [installed]" o "debian - installed" en la misma linea
+    if echo "$list_output" | grep -i "debian" | grep -qi "installed"; then
+        return 0
+    fi
+
+    # Formato 2: Seccion "Installed distributions:" seguida de "debian"
+    # proot-distro list muestra "Installed distributions:" como encabezado
+    # y debajo lista los nombres, uno por linea
+    if echo "$list_output" | sed -n '/Installed/,${p}' | grep -q "debian"; then
+        return 0
+    fi
+
+    # Formato 3: "debian" en una linea y "installed" en la siguiente
+    if echo "$list_output" | grep -A1 "debian" | grep -qi "installed"; then
+        return 0
+    fi
+
+    return 1
+}
+
+# ============================================================
+# 3. INSTALAR PROOT-DISTRO
 # ============================================================
 echo "[1/6] Verificando proot-distro..."
 
@@ -60,32 +93,22 @@ fi
 echo "       proot-distro disponible."
 
 # ============================================================
-# 3. VERIFICAR/INSTALAR DEBIAN
+# 4. VERIFICAR/INSTALAR DEBIAN
 #    VALIDACION SOLO con `proot-distro list`
 #    "container already exists" NO es error.
 # ============================================================
 echo "[2/6] Verificando Debian..."
 
-DEBIAN_INSTALLED=false
-
-# Metodo UNICO de validacion: proot-distro list
-if proot-distro list 2>/dev/null | grep -q "debian"; then
-    # Verificar que dice "installed" (no solo disponible)
-    if proot-distro list 2>/dev/null | grep -i "debian" | grep -qi "installed"; then
-        DEBIAN_INSTALLED=true
-    fi
-fi
-
-if [ "${DEBIAN_INSTALLED}" = "true" ]; then
+if debian_is_installed; then
     echo "       Debian ya esta instalado. (OK)"
 else
     echo "       Instalando Debian (puede tardar varios minutos)..."
-    
+
     # Ejecutar instalacion
     # "container already exists" no es error — se ignora
     proot-distro install debian || {
         # Verificar si fallo realmente o si ya existia
-        if proot-distro list 2>/dev/null | grep -i "debian" | grep -qi "installed"; then
+        if debian_is_installed; then
             echo "       Debian ya existia (no es error). Continuando..."
         else
             echo "  ERROR: La instalacion de Debian fallo."
@@ -93,9 +116,9 @@ else
             exit 1
         fi
     }
-    
-    # Verificacion post-instalacion con comando real
-    if proot-distro list 2>/dev/null | grep -i "debian" | grep -qi "installed"; then
+
+    # Verificacion post-instalacion
+    if debian_is_installed; then
         echo "       Debian instalado correctamente."
     else
         echo "  ERROR: Debian no aparece como instalado en proot-distro list."
@@ -105,7 +128,7 @@ else
 fi
 
 # ============================================================
-# 4. INSTALAR PAQUETES DENTRO DE DEBIAN
+# 5. INSTALAR PAQUETES DENTRO DE DEBIAN
 #    Solo exit code != 0 es error real.
 # ============================================================
 echo "[3/6] Instalando paquetes en Debian..."
@@ -113,9 +136,9 @@ echo "       (Esto puede tardar la primera vez)"
 
 proot-distro login debian -- bash -c '
     export DEBIAN_FRONTEND=noninteractive
-    
+
     apt update -y
-    
+
     apt install -y \
         xvfb \
         openbox \
@@ -151,14 +174,14 @@ PKG_CHECK=$(proot-distro login debian -- bash -c '
 
 if echo "${PKG_CHECK}" | grep -q "^MISSING:"; then
     MISSING_PKGS=$(echo "${PKG_CHECK}" | sed 's/^MISSING://')
-    echo "  AVISO: Algunos paquetes no se encontraron en PATH:${MISS_PKGS}"
+    echo "  AVISO: Algunos paquetes no se encontraron en PATH:${MISSING_PKGS}"
     echo "  Los binarios pueden estar en ubicaciones no estandar."
 else
     echo "       Paquetes verificados correctamente."
 fi
 
 # ============================================================
-# 5. INSTALAR CONFIGURACIONES DENTRO DE DEBIAN
+# 6. INSTALAR CONFIGURACIONES DENTRO DE DEBIAN
 #    Se escriben via proot-distro login, NO via rutas directas.
 # ============================================================
 echo "[4/6] Instalando configuraciones..."
@@ -166,7 +189,7 @@ echo "[4/6] Instalando configuraciones..."
 proot-distro login debian -- bash -c '
     # --- Openbox rc.xml ---
     mkdir -p /root/.config/openbox
-    
+
     cat > /root/.config/openbox/rc.xml << '"'"'OPENBOXRC'"'"'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_config xmlns="http://openbox.org/3.4/rc">
@@ -333,7 +356,7 @@ TINT2RC
 
     # --- .desktop para boton de menu ---
     mkdir -p /usr/share/applications
-    
+
     cat > /usr/share/applications/vertil-menu.desktop << '"'"'DESKTOPMENU'"'"'
 [Desktop Entry]
 Name=Menu
@@ -365,7 +388,7 @@ else
 fi
 
 # ============================================================
-# 6. INSTALAR QRENCODE EN TERMUX (OPCIONAL)
+# 7. INSTALAR QRENCODE EN TERMUX (OPCIONAL)
 # ============================================================
 echo "[5/6] Verificando qrencode en Termux..."
 if ! command -v qrencode &>/dev/null; then
@@ -375,12 +398,12 @@ else
 fi
 
 # ============================================================
-# 7. FINALIZACION
+# 8. FINALIZACION
 # ============================================================
 echo "[6/6] Verificacion final..."
 
 # Verificacion final: Debian sigue instalado
-if ! proot-distro list 2>/dev/null | grep -i "debian" | grep -qi "installed"; then
+if ! debian_is_installed; then
     echo "  ERROR: Debian no aparece como instalado. Algo salio mal."
     exit 1
 fi
