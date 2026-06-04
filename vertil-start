@@ -239,15 +239,13 @@ info "Iniciando x11vnc en puerto ${VNC_PORT}..."
 x11vnc \
     -display "${DISPLAY_NUM}" \
     -rfbport "${VNC_PORT}" \
+    -listen 0.0.0.0 \
     -nopw \
     -forever \
     -shared \
     -noshm \
-    -no6 \
     -noxrecord \
     -noxdamage \
-    -nowf \
-    -nowcr \
     >> "${LOG_DIR}/vnc.log" 2>&1 &
 VNC_PID=$!
 echo "VNC:${VNC_PID}" >> "${PID_FILE}"
@@ -340,7 +338,8 @@ while true; do
         x11vnc \
             -display "${DISPLAY_NUM}" \
             -rfbport "${VNC_PORT}" \
-            -nopw -forever -shared -noshm -no6 -noxrecord -noxdamage -nowf -nowcr \
+            -listen 0.0.0.0 \
+            -nopw -forever -shared -noshm -noxrecord -noxdamage \
             >> "${LOG_DIR}/vnc.log" 2>&1 &
         VNC_PID=$!
         sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${PID_FILE}"
