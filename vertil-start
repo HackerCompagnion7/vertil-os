@@ -1,65 +1,82 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/bin/bash
 # ============================================================
-# vertil-start — Script de lanzamiento de Vertil OS Fase 1
+# vertil-start — Runtime de Vertil OS (Fase 1)
 # ============================================================
-# CAPA: Termux (fuera del proot)
-# PROPOSITO: Lanzar proot-distro con el script interno que
-#            inicia Xvfb, Openbox, Tint2 y VNC.
-# REGLA: El usuario NUNCA debe teclear proot-distro login.
+# CAPA: DEBIAN (obligatorio)
+# PROPOSITO: Iniciar Xvfb, Openbox, Tint2 y VNC
+# REGLA: Solo se ejecuta en Debian/proot. Aborta si detecta Termux.
+# PROHIBIDO: proot-distro, $PREFIX, variables de Termux
 # ============================================================
 
 set -eo pipefail
 
 # ============================================================
-# VALORES POR DEFECTO PARA VARIABLES TERMUX
-#    Evita el crash "PREFIX: unbound variable"
-#    Estas variables siempre existen en Termux nativo,
-#    pero las definimos defensivamente.
-# ============================================================
-PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-HOME="${HOME:-/data/data/com.termux/files/home}"
-
-# ============================================================
-# VERIFICACIONES DE ENTORNO — PRIMERO QUE NADA
+# 1. VERIFICACION DE ENTORNO — DEBIAN OBLIGATORIO
 # ============================================================
 
-# 1. Verificar que NO estamos dentro de un proot
-if [ -n "${PROOT:-}" ] || [ -n "${PROOT_TMP:-}" ]; then
+# Regla: Solo válido si NO existe $TERMUX_VERSION
+if [ -n "${TERMUX_VERSION:-}" ]; then
     echo ""
-    echo "  ERROR: Este script se esta ejecutando dentro de un entorno proot."
-    echo "  vertil-start DEBE ejecutarse en Termux nativo."
+    echo "  ERROR: Se detecto \$TERMUX_VERSION."
+    echo "  Este script se ejecuta DENTRO de Debian, no en Termux."
     echo ""
-    echo "  Salga del proot primero:"
-    echo "    exit"
+    echo "  Desde Termux, entra a Debian con:"
+    echo "    proot-distro login debian --bind ~/vertil-os:/root/vertil-os"
     echo ""
-    echo "  Luego ejecute desde Termux:"
-    echo "    ./vertil-start"
+    echo "  O usa el lanzador rapido:"
+    echo "    ./vertil"
     echo ""
     exit 1
 fi
 
-# 2. Verificar que estamos en Termux
-if [ -z "${TERMUX_VERSION:-}" ] && [ ! -x "${PREFIX}/bin/pkg" ]; then
+# PROHIBIDO: proot-distro no debe existir ni ejecutarse aqui
+if command -v proot-distro &>/dev/null; then
     echo ""
-    echo "  ERROR: Este script requiere Termux."
-    echo "  No se detecto \$TERMUX_VERSION ni el binario 'pkg'."
+    echo "  ERROR: proot-distro detectado en PATH."
+    echo "  Este script se ejecuta DENTRO de Debian."
+    echo "  No se debe ejecutar proot-distro dentro de proot."
+    echo ""
+    exit 1
+fi
+
+# Verificar que estamos en un entorno Linux con los binarios necesarios
+CRITICAL_MISSING=""
+for cmd in Xvfb openbox xterm; do
+    if ! command -v "$cmd" &>/dev/null; then
+        CRITICAL_MISSING="${CRITICAL_MISSING} ${cmd}"
+    fi
+done
+
+if [ -n "${CRITICAL_MISSING}" ]; then
+    echo ""
+    echo "  ERROR: Faltan comandos criticos:${CRITICAL_MISSING}"
+    echo "  Los paquetes no se instalaron correctamente."
+    echo "  Ejecuta desde Termux: bash vertil-build.sh"
+    echo ""
+    exit 1
+fi
+
+# Verificar que al menos un servidor VNC existe
+if ! command -v x0vncserver &>/dev/null && ! command -v x11vnc &>/dev/null; then
+    echo ""
+    echo "  ERROR: No se encontro ningun servidor VNC."
+    echo "  Se necesita x0vncserver o x11vnc."
+    echo "  Ejecuta desde Termux: bash vertil-build.sh"
     echo ""
     exit 1
 fi
 
 # ============================================================
-# CONSTANTES
+# 2. CONSTANTES (todas definidas localmente, sin Termux)
 # ============================================================
-ROOTFS="${PREFIX}/var/lib/proot-distro/installed-rootfs/debian"
-LOG_DIR="${HOME}/.vertil/logs"
-PID_FILE="${HOME}/.vertil/pids"
-READY_FLAG="${HOME}/.vertil/ready"
-INNER_SCRIPT="/root/vertil-inner.sh"
 DISPLAY_NUM=":0"
 RESOLUTION="1280x720x24"
 VNC_PORT="5901"
+LOG_DIR="/root/.vertil/logs"
+PID_FILE="/root/.vertil/pids"
+READY_FLAG="/root/.vertil/ready"
 
-# Colores para la terminal
+# Colores para terminal
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -68,7 +85,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 # ============================================================
-# DIRECTORIOS Y LOG PRINCIPAL
+# 3. DIRECTORIOS Y LOG
 # ============================================================
 mkdir -p "${LOG_DIR}"
 
@@ -87,490 +104,202 @@ warn()  { log "WARN"  "$@"; }
 error() { log "ERROR" "$@"; }
 
 # ============================================================
-# PROOT PID (inicializar vacio)
+# 4. LIMPIEZA DE ESTADO ANTERIOR
 # ============================================================
-PROOT_PID=""
+rm -f "${PID_FILE}"
+rm -f "${READY_FLAG}"
 
 # ============================================================
-# FUNCION DE LIMPIEZA
+# 5. FUNCION DE LIMPIEZA (Ctrl+C)
 # ============================================================
 cleanup() {
     echo ""
     info "Senal de terminacion recibida. Limpiando procesos..."
 
-    # 1. Leer PIDs del archivo y matar procesos internos
+    # Matar procesos del archivo PID
     if [ -f "${PID_FILE}" ]; then
-        info "Leyendo PIDs desde ${PID_FILE}..."
-        while IFS= read -r pid_entry; do
-            local name
-            name=$(echo "$pid_entry" | cut -d: -f1 | tr -d ' ')
-            local pid
-            pid=$(echo "$pid_entry" | cut -d: -f2 | tr -d ' ')
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        while IFS= read -r entry; do
+            local name pid
+            name=$(echo "$entry" | cut -d: -f1 | tr -d ' ')
+            pid=$(echo "$entry" | cut -d: -f2 | tr -d ' ')
+            if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
                 info "Deteniendo ${name} (PID ${pid})..."
-                kill "$pid" 2>/dev/null || true
-                sleep 0.3
+                kill "${pid}" 2>/dev/null || true
+                sleep 0.2
             fi
         done < "${PID_FILE}"
         rm -f "${PID_FILE}"
     fi
 
-    # 2. Matar el proceso proot si sigue vivo
-    if [ -n "${PROOT_PID:-}" ] && kill -0 "${PROOT_PID}" 2>/dev/null; then
-        info "Deteniendo sesion proot (PID ${PROOT_PID})..."
-        kill "${PROOT_PID}" 2>/dev/null || true
-        sleep 0.5
-        # Forzar terminacion si sigue vivo
-        if kill -0 "${PROOT_PID}" 2>/dev/null; then
-            warn "Forzando terminacion de proot..."
-            kill -9 "${PROOT_PID}" 2>/dev/null || true
-        fi
-    fi
+    # Limpieza residual
+    pkill -f "Xvfb" 2>/dev/null || true
+    pkill -f "x0vncserver" 2>/dev/null || true
+    pkill -f "x11vnc" 2>/dev/null || true
+    pkill -f "openbox" 2>/dev/null || true
+    pkill -f "tint2" 2>/dev/null || true
 
-    # 3. Limpieza residual de procesos Xvfb/VNC
-    # Estos procesos se ejecutan dentro de proot pero sus PIDs son
-    # visibles desde Termux. Si no fueron limpiados por el script
-    # interno, los intentamos matar aqui.
-    local stale_procs
-    stale_procs=$(pgrep -f "Xvfb" 2>/dev/null || true)
-    if [ -n "${stale_procs}" ]; then
-        info "Limpiando procesos Xvfb residuales..."
-        echo "${stale_procs}" | xargs kill 2>/dev/null || true
-    fi
-
-    stale_procs=$(pgrep -f "x0vncserver" 2>/dev/null || true)
-    if [ -n "${stale_procs}" ]; then
-        info "Limpiando procesos x0vncserver residuales..."
-        echo "${stale_procs}" | xargs kill 2>/dev/null || true
-    fi
-
-    stale_procs=$(pgrep -f "x11vnc" 2>/dev/null || true)
-    if [ -n "${stale_procs}" ]; then
-        info "Limpiando procesos x11vnc residuales..."
-        echo "${stale_procs}" | xargs kill 2>/dev/null || true
-    fi
-
-    # 4. Limpiar archivos de estado
     rm -f "${READY_FLAG}"
-    rm -f "${ROOTFS}/root/.vertil/ready" 2>/dev/null || true
 
     info "Limpieza completada. Vertil OS detenido."
     exit 0
 }
 
-# Capturar senales de terminacion
 trap cleanup SIGINT SIGTERM
 
-# ============================================================
-# VERIFICAR QUE EL ROOTFS EXISTE (validacion robusta)
-# ============================================================
-info "Verificando entorno..."
-
-# Metodo 1: Verificar via proot-distro list (mas confiable)
-DEBIAN_READY=false
-if command -v proot-distro &>/dev/null; then
-    if proot-distro list 2>/dev/null | grep -qi "debian.*installed"; then
-        DEBIAN_READY=true
-    fi
-fi
-
-# Metodo 2: Verificar directorio rootfs directamente
-if [ "${DEBIAN_READY}" = "false" ] && [ -d "${ROOTFS}" ] && [ -d "${ROOTFS}/usr" ]; then
-    DEBIAN_READY=true
-fi
-
-if [ "${DEBIAN_READY}" = "false" ]; then
-    error "No se encontro una instalacion de Debian valida."
-    error "  proot-distro list no muestra Debian como instalado."
-    error "  Rootfs esperado en: ${ROOTFS}"
-    error ""
-    error "Ejecute primero: bash vertil-build.sh"
-    exit 1
-fi
-
-# Verificar que los binarios criticos existen en el rootfs
-CRITICAL_MISSING=""
-for binary in Xvfb openbox xterm; do
-    if [ ! -x "${ROOTFS}/usr/bin/${binary}" ]; then
-        CRITICAL_MISSING="${CRITICAL_MISSING} ${binary}"
-    fi
-done
-
-if [ -n "${CRITICAL_MISSING}" ]; then
-    error "Faltan binarios criticos en el rootfs:${CRITICAL_MISSING}"
-    error "Los paquetes pueden no haberse instalado correctamente."
-    error "Ejecute nuevamente: bash vertil-build.sh"
-    exit 1
-fi
-
-# Verificar que al menos un servidor VNC esta disponible
-VNC_SERVER=""
-if [ -x "${ROOTFS}/usr/bin/x0vncserver" ]; then
-    VNC_SERVER="x0vncserver"
-elif [ -x "${ROOTFS}/usr/bin/x11vnc" ]; then
-    VNC_SERVER="x11vnc"
-else
-    error "No se encontro ningun servidor VNC en el rootfs."
-    error "Se necesita x0vncserver o x11vnc."
-    error "Ejecute nuevamente: bash vertil-build.sh"
-    exit 1
-fi
-
-info "Entorno validado: Debian instalado, VNC server: ${VNC_SERVER}"
-
-# ============================================================
-# LIMPIAR ESTADO ANTERIOR
-# ============================================================
-rm -f "${READY_FLAG}"
-rm -f "${PID_FILE}"
-rm -f "${ROOTFS}/root/.vertil/ready" 2>/dev/null || true
-
-# ============================================================
-# GENERAR SCRIPT INTERNO (se ejecuta dentro del proot)
-# Este script se ejecuta en CAPA DEBIAN (dentro de proot).
-# NO usa variables de Termux ($PREFIX, $TERMUX_VERSION, etc.)
-# ============================================================
-info "Preparando entorno interno..."
-
-mkdir -p "${ROOTFS}/root/.vertil/logs"
-
-cat > "${ROOTFS}${INNER_SCRIPT}" << 'INNERSCRIPT'
-#!/bin/bash
-# ============================================================
-# vertil-inner.sh — Script interno de Vertil OS
-# CAPA: Debian (dentro del entorno proot)
-# ============================================================
-# REGLA CRITICA: Este script se ejecuta dentro de Debian/proot.
-# NO usar variables de Termux ($PREFIX, $TERMUX_VERSION, etc.)
-# Todas las variables deben ser definidas localmente.
-# ============================================================
-
-# --- Constantes internas (definidas aqui, sin depender de Termux) ---
-INNER_DISPLAY=":0"
-INNER_RESOLUTION="1280x720x24"
-INNER_VNC_PORT="5901"
-INNER_LOG_DIR="/root/.vertil/logs"
-INNER_PID_FILE="/root/.vertil/pids"
-INNER_READY_FLAG="/root/.vertil/ready"
-
-mkdir -p "${INNER_LOG_DIR}"
-
-# --- Funciones de log ---
-inner_log() {
-    local level="$1"; shift
-    local msg="$*"
-    local ts
-    ts=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[${ts}] [${level}] ${msg}" | tee -a "${INNER_LOG_DIR}/inner.log"
-}
-
-inner_info()  { inner_log "INFO"  "$@"; }
-inner_error() { inner_log "ERROR" "$@"; }
-
-# --- Funcion de limpieza interna ---
-inner_cleanup() {
-    inner_info "Limpiando procesos internos..."
-    if [ -f "${INNER_PID_FILE}" ]; then
-        while IFS= read -r entry; do
-            local iname
-            iname=$(echo "$entry" | cut -d: -f1 | tr -d ' ')
-            local ipid
-            ipid=$(echo "$entry" | cut -d: -f2 | tr -d ' ')
-            if [ -n "${ipid}" ] && kill -0 "${ipid}" 2>/dev/null; then
-                inner_info "Deteniendo ${iname} (PID ${ipid})..."
-                kill "${ipid}" 2>/dev/null || true
-                sleep 0.2
-            fi
-        done < "${INNER_PID_FILE}"
-        rm -f "${INNER_PID_FILE}"
-    fi
-    rm -f "${INNER_READY_FLAG}"
-    inner_info "Limpieza interna completada."
-    exit 0
-}
-
-# Capturar senales dentro del proot
-trap inner_cleanup SIGINT SIGTERM SIGHUP
-
 # Inicializar archivo de PIDs
-> "${INNER_PID_FILE}"
+> "${PID_FILE}"
 
-# --- Asegurar directorio de sockets X11 ---
+# ============================================================
+# 6. PREPARAR ENTORNO X11
+# ============================================================
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix 2>/dev/null || true
-
-# --- Asegurar directorio .vnc para x0vncserver ---
 mkdir -p /root/.vnc
 
 # ============================================================
-# 1. INICIAR Xvfb
+# 7. INICIAR Xvfb
 # ============================================================
-inner_info "Iniciando Xvfb en display ${INNER_DISPLAY} con resolucion ${INNER_RESOLUTION}..."
+info "Iniciando Xvfb en display ${DISPLAY_NUM} (${RESOLUTION})..."
 
-Xvfb "${INNER_DISPLAY}" \
-    -screen 0 "${INNER_RESOLUTION}" \
+Xvfb "${DISPLAY_NUM}" \
+    -screen 0 "${RESOLUTION}" \
     -ac \
     +extension GLX \
     +extension RENDER \
     -noreset \
-    >> "${INNER_LOG_DIR}/xvfb.log" 2>&1 &
+    >> "${LOG_DIR}/xvfb.log" 2>&1 &
 XVFB_PID=$!
-echo "Xvfb:${XVFB_PID}" >> "${INNER_PID_FILE}"
+echo "Xvfb:${XVFB_PID}" >> "${PID_FILE}"
 
-# Esperar a que Xvfb este listo
 sleep 1.5
+
 if ! kill -0 "${XVFB_PID}" 2>/dev/null; then
-    inner_error "Xvfb no pudo iniciarse. Ver ${INNER_LOG_DIR}/xvfb.log"
-    inner_cleanup
+    error "Xvfb no pudo iniciarse. Ver ${LOG_DIR}/xvfb.log"
+    cleanup
     exit 1
 fi
-inner_info "Xvfb iniciado (PID ${XVFB_PID})"
+
+info "Xvfb iniciado (PID ${XVFB_PID})"
 
 # ============================================================
-# 2. ESTABLECER DISPLAY
+# 8. ESTABLECER DISPLAY
 # ============================================================
-export DISPLAY="${INNER_DISPLAY}"
+export DISPLAY="${DISPLAY_NUM}"
 
 # ============================================================
-# 3. INICIAR Openbox
+# 9. INICIAR Openbox
 # ============================================================
-inner_info "Iniciando Openbox..."
+info "Iniciando Openbox..."
 
 openbox \
-    >> "${INNER_LOG_DIR}/openbox.log" 2>&1 &
+    >> "${LOG_DIR}/openbox.log" 2>&1 &
 OPENBOX_PID=$!
-echo "Openbox:${OPENBOX_PID}" >> "${INNER_PID_FILE}"
+echo "Openbox:${OPENBOX_PID}" >> "${PID_FILE}"
 
 sleep 1.5
+
 if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
-    inner_error "Openbox no pudo iniciarse. Ver ${INNER_LOG_DIR}/openbox.log"
-    inner_cleanup
+    error "Openbox no pudo iniciarse. Ver ${LOG_DIR}/openbox.log"
+    cleanup
     exit 1
 fi
-inner_info "Openbox iniciado (PID ${OPENBOX_PID})"
+
+info "Openbox iniciado (PID ${OPENBOX_PID})"
 
 # ============================================================
-# 4. INICIAR TINT2 (no critico para Fase 1)
+# 10. INICIAR TINT2 (no critico)
 # ============================================================
-inner_info "Iniciando Tint2..."
+info "Iniciando Tint2..."
 
-tint2 \
-    >> "${INNER_LOG_DIR}/tint2.log" 2>&1 &
-TINT2_PID=$!
-echo "Tint2:${TINT2_PID}" >> "${INNER_PID_FILE}"
+if command -v tint2 &>/dev/null; then
+    tint2 \
+        >> "${LOG_DIR}/tint2.log" 2>&1 &
+    TINT2_PID=$!
+    echo "Tint2:${TINT2_PID}" >> "${PID_FILE}"
 
-sleep 1
-if ! kill -0 "${TINT2_PID}" 2>/dev/null; then
-    inner_info "AVISO: Tint2 no pudo iniciarse (no critico para Fase 1)"
+    sleep 1
+    if kill -0 "${TINT2_PID}" 2>/dev/null; then
+        info "Tint2 iniciado (PID ${TINT2_PID})"
+    else
+        info "AVISO: Tint2 no pudo iniciarse (no critico para Fase 1)"
+    fi
 else
-    inner_info "Tint2 iniciado (PID ${TINT2_PID})"
+    info "AVISO: tint2 no encontrado. Barra no disponible."
 fi
 
 # ============================================================
-# 5. INICIAR SERVIDOR VNC
-#    Intenta x0vncserver primero; si falla, usa x11vnc.
+# 11. INICIAR SERVIDOR VNC
+#    x0vncserver primero, x11vnc como fallback.
+#    Solo exit code != 0 es error.
 # ============================================================
 VNC_STARTED=false
 
 # Intento 1: x0vncserver (TigerVNC)
 if command -v x0vncserver &>/dev/null; then
-    inner_info "Iniciando x0vncserver en puerto ${INNER_VNC_PORT}..."
+    info "Iniciando x0vncserver en puerto ${VNC_PORT}..."
 
     x0vncserver \
-        -display "${INNER_DISPLAY}" \
-        -rfbport "${INNER_VNC_PORT}" \
+        -display "${DISPLAY_NUM}" \
+        -rfbport "${VNC_PORT}" \
         -SecurityTypes None \
-        >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
+        >> "${LOG_DIR}/vnc.log" 2>&1 &
     VNC_PID=$!
-    echo "VNC:${VNC_PID}" >> "${INNER_PID_FILE}"
+    echo "VNC:${VNC_PID}" >> "${PID_FILE}"
 
     sleep 2
     if kill -0 "${VNC_PID}" 2>/dev/null; then
-        inner_info "x0vncserver iniciado (PID ${VNC_PID})"
+        info "x0vncserver iniciado (PID ${VNC_PID})"
         VNC_STARTED=true
     else
-        inner_info "x0vncserver fallo, intentando x11vnc como fallback..."
-        sed -i "/^VNC:/d" "${INNER_PID_FILE}"
+        info "x0vncserver no respondio. Intentando x11vnc..."
+        sed -i "/^VNC:/d" "${PID_FILE}"
     fi
 fi
 
-# Intento 2: x11vnc (fallback universal)
+# Intento 2: x11vnc (fallback)
 if [ "${VNC_STARTED}" = "false" ] && command -v x11vnc &>/dev/null; then
-    inner_info "Iniciando x11vnc en puerto ${INNER_VNC_PORT}..."
+    info "Iniciando x11vnc en puerto ${VNC_PORT}..."
 
     x11vnc \
-        -display "${INNER_DISPLAY}" \
-        -rfbport "${INNER_VNC_PORT}" \
+        -display "${DISPLAY_NUM}" \
+        -rfbport "${VNC_PORT}" \
         -nopw \
         -forever \
         -shared \
         -noxrecord \
         -noxdamage \
-        >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
+        >> "${LOG_DIR}/vnc.log" 2>&1 &
     VNC_PID=$!
-    echo "VNC:${VNC_PID}" >> "${INNER_PID_FILE}"
+    echo "VNC:${VNC_PID}" >> "${PID_FILE}"
 
     sleep 2
     if kill -0 "${VNC_PID}" 2>/dev/null; then
-        inner_info "x11vnc iniciado (PID ${VNC_PID})"
+        info "x11vnc iniciado (PID ${VNC_PID})"
         VNC_STARTED=true
     fi
 fi
 
-# Verificar que ALGUN servidor VNC arranco
+# Verificacion final: ALGUN servidor VNC debe estar corriendo
 if [ "${VNC_STARTED}" = "false" ]; then
-    inner_error "Ningun servidor VNC pudo iniciarse."
-    inner_error "Ver ${INNER_LOG_DIR}/vnc.log para detalles."
-    inner_cleanup
-    exit 1
-fi
-
-# ============================================================
-# 6. ESCRIBIR FLAG DE LISTO
-# ============================================================
-date '+%Y-%m-%d %H:%M:%S' > "${INNER_READY_FLAG}"
-inner_info "Todos los servicios estan en ejecucion. Flag de listo escrito."
-
-# ============================================================
-# 7. MONITOREAR PROCESOS
-# ============================================================
-inner_info "Monitoreando servicios... (Ctrl+C para detener)"
-
-while true; do
-    # Verificar proceso critico: Xvfb
-    if ! kill -0 "${XVFB_PID}" 2>/dev/null; then
-        inner_error "Xvfb ha muerto inesperadamente. Deteniendo sistema."
-        break
-    fi
-    
-    # Auto-reinicio: Openbox
-    if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
-        inner_info "Openbox ha muerto. Reiniciando..."
-        openbox >> "${INNER_LOG_DIR}/openbox.log" 2>&1 &
-        OPENBOX_PID=$!
-        sed -i "s/Openbox:.*/Openbox:${OPENBOX_PID}/" "${INNER_PID_FILE}"
-        sleep 1
-    fi
-    
-    # Auto-reinicio: VNC
-    if ! kill -0 "${VNC_PID}" 2>/dev/null; then
-        inner_info "VNC ha muerto. Reiniciando con x11vnc..."
-        if command -v x11vnc &>/dev/null; then
-            x11vnc \
-                -display "${INNER_DISPLAY}" \
-                -rfbport "${INNER_VNC_PORT}" \
-                -nopw \
-                -forever \
-                -shared \
-                -noxrecord \
-                -noxdamage \
-                >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
-            VNC_PID=$!
-            sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${INNER_PID_FILE}"
-            sleep 1
-        else
-            inner_error "VNC murio y x11vnc no esta disponible. Deteniendo."
-            break
-        fi
-    fi
-    
-    # Auto-reinicio: Tint2 (no critico)
-    if [ -n "${TINT2_PID:-}" ] && ! kill -0 "${TINT2_PID}" 2>/dev/null; then
-        inner_info "Tint2 ha muerto. Reiniciando..."
-        tint2 >> "${INNER_LOG_DIR}/tint2.log" 2>&1 &
-        TINT2_PID=$!
-        sed -i "s/Tint2:.*/Tint2:${TINT2_PID}/" "${INNER_PID_FILE}"
-        sleep 1
-    fi
-    
-    sleep 5
-done
-
-# Si salimos del bucle, algo murio inesperadamente
-inner_error "Saliendo del monitor por fallo critico."
-inner_cleanup
-INNERSCRIPT
-
-chmod +x "${ROOTFS}${INNER_SCRIPT}"
-
-info "Script interno generado en ${ROOTFS}${INNER_SCRIPT}"
-
-# ============================================================
-# INICIAR VERTIL OS
-# ============================================================
-echo ""
-echo -e "${CYAN}  =========================================${NC}"
-echo -e "${CYAN}   Iniciando Vertil OS - Fase 1${NC}"
-echo -e "${CYAN}  =========================================${NC}"
-echo ""
-info "Lanzando entorno proot con Debian..."
-
-# Lanzar proot-distro en segundo plano
-# --bind comparte el directorio home de Termux dentro del proot
-proot-distro login debian \
-    --bind "${HOME}":/root/termux-home \
-    -- bash "${INNER_SCRIPT}" &
-PROOT_PID=$!
-
-info "Sesion proot iniciada (PID ${PROOT_PID})"
-
-# ============================================================
-# ESPERAR A QUE EL SISTEMA ESTE LISTO
-#    Espera a que el script interno escriba el flag de listo.
-#    Lee directamente del rootfs (accesible desde Termux).
-# ============================================================
-info "Esperando a que los servicios internos se inicien..."
-
-TIMEOUT=45
-ELAPSED=0
-READY=false
-
-while [ ${ELAPSED} -lt ${TIMEOUT} ]; do
-    # Verificar que el proceso proot sigue vivo
-    if ! kill -0 "${PROOT_PID}" 2>/dev/null; then
-        error "El proceso proot ha muerto prematuramente."
-        error "Verifique los logs en ${ROOTFS}/root/.vertil/logs/"
-        tail -20 "${ROOTFS}/root/.vertil/logs/inner.log" 2>/dev/null || true
-        cleanup
-        exit 1
-    fi
-    
-    # Verificar flag de listo
-    if [ -f "${ROOTFS}/root/.vertil/ready" ]; then
-        READY=true
-        break
-    fi
-    
-    sleep 1
-    ELAPSED=$((ELAPSED + 1))
-    if [ $((ELAPSED % 5)) -eq 0 ]; then
-        info "Esperando... (${ELAPSED}s / ${TIMEOUT}s)"
-    fi
-done
-
-if [ "${READY}" != "true" ]; then
-    error "Los servicios internos no se iniciaron dentro del tiempo limite (${TIMEOUT}s)."
-    error "Verifique los logs en ${ROOTFS}/root/.vertil/logs/"
-    
-    # Verificar si el proceso proot sigue vivo
-    if kill -0 "${PROOT_PID}" 2>/dev/null; then
-        error "El proceso proot sigue vivo pero los servicios no arrancaron."
-        error "Ultimas lineas del log interno:"
-        tail -20 "${ROOTFS}/root/.vertil/logs/inner.log" 2>/dev/null || true
-    fi
-    
+    error "Ningun servidor VNC pudo iniciarse."
+    error "Ver ${LOG_DIR}/vnc.log para detalles."
     cleanup
     exit 1
 fi
 
-info "Servicios internos iniciados correctamente."
+# ============================================================
+# 12. FLAG DE LISTO
+# ============================================================
+date '+%Y-%m-%d %H:%M:%S' > "${READY_FLAG}"
+info "Todos los servicios estan en ejecucion."
 
 # ============================================================
-# MOSTRAR INFORMACION DE CONEXION
+# 13. MOSTRAR INFORMACION DE CONEXION
 # ============================================================
 
-# Obtener IP local
 LOCAL_IP=""
+
+# Intentar obtener IP (dentro de proot comparte red con Android)
 if command -v ip &>/dev/null; then
     LOCAL_IP=$(ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
 fi
@@ -589,34 +318,74 @@ echo -e "${GREEN}  +------------------------------------------+${NC}"
 echo -e "${GREEN}  |  Vertil OS esta en ejecucion             |${NC}"
 echo -e "${GREEN}  +------------------------------------------+${NC}"
 echo -e "${GREEN}  |                                          |${NC}"
-echo -e "${GREEN}  |  VNC Host: ${BOLD}${LOCAL_IP}${NC}                    "
-echo -e "${GREEN}  |  VNC Port: ${BOLD}${VNC_PORT}${NC}                    "
-echo -e "${GREEN}  |  Display:  ${BOLD}${DISPLAY_NUM}${NC}                    "
+echo -e "${GREEN}  |  VNC: ${BOLD}${LOCAL_IP}:${VNC_PORT}${NC}                      "
+echo -e "${GREEN}  |  Display: ${BOLD}${DISPLAY_NUM}${NC}                       "
 echo -e "${GREEN}  |  Resolucion: 1280x720                   |${NC}"
 echo -e "${GREEN}  |  Seguridad: Ninguna (Fase 1)            |${NC}"
 echo -e "${GREEN}  |                                          |${NC}"
 echo -e "${GREEN}  |  Presione ${BOLD}Ctrl+C${NC} para detener            "
 echo -e "${GREEN}  +------------------------------------------+${NC}"
 echo ""
-echo -e "${CYAN}  Conecte su cliente VNC a: ${BOLD}${LOCAL_IP}:${VNC_PORT}${NC}"
-echo -e "${CYAN}  (Clientes recomendados: bVNC, RealVNC, MultiVNC)${NC}"
-echo ""
 
-# Generar codigo QR si qrencode esta disponible
+# Codigo QR si qrencode esta disponible
 if command -v qrencode &>/dev/null; then
-    echo -e "${YELLOW}  Codigo QR de conexion VNC:${NC}"
+    echo -e "${YELLOW}  Codigo QR:${NC}"
     qrencode -t ANSIUTF8 "vnc://${LOCAL_IP}:${VNC_PORT}" 2>/dev/null || true
     echo ""
 fi
 
 # ============================================================
-# MONITOREO PRINCIPAL - Esperar hasta Ctrl+C
+# 14. MONITOREO DE PROCESOS
 # ============================================================
-info "Vertil OS en ejecucion. Presione Ctrl+C para detener."
+info "Monitoreando servicios... (Ctrl+C para detener)"
 
-wait "${PROOT_PID}" 2>/dev/null || true
+while true; do
+    # Xvfb es critico — si muere, todo muere
+    if ! kill -0 "${XVFB_PID}" 2>/dev/null; then
+        error "Xvfb ha muerto. Deteniendo sistema."
+        break
+    fi
 
-# Si llegamos aqui, el proceso proot termino por si solo
-warn "El proceso proot ha terminado inesperadamente."
-warn "Verifique los logs en ${ROOTFS}/root/.vertil/logs/ y ${LOG_DIR}/"
+    # Openbox — auto-reinicio
+    if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
+        info "Openbox ha muerto. Reiniciando..."
+        openbox >> "${LOG_DIR}/openbox.log" 2>&1 &
+        OPENBOX_PID=$!
+        sed -i "s/Openbox:.*/Openbox:${OPENBOX_PID}/" "${PID_FILE}"
+        sleep 1
+    fi
+
+    # VNC — auto-reinicio con x11vnc
+    if ! kill -0 "${VNC_PID}" 2>/dev/null; then
+        info "VNC ha muerto. Reiniciando..."
+        if command -v x11vnc &>/dev/null; then
+            x11vnc \
+                -display "${DISPLAY_NUM}" \
+                -rfbport "${VNC_PORT}" \
+                -nopw -forever -shared -noxrecord -noxdamage \
+                >> "${LOG_DIR}/vnc.log" 2>&1 &
+            VNC_PID=$!
+            sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${PID_FILE}"
+            sleep 1
+        else
+            error "VNC murio y x11vnc no disponible. Deteniendo."
+            break
+        fi
+    fi
+
+    # Tint2 — auto-reinicio (no critico)
+    if [ -n "${TINT2_PID:-}" ] && ! kill -0 "${TINT2_PID}" 2>/dev/null; then
+        if command -v tint2 &>/dev/null; then
+            info "Tint2 ha muerto. Reiniciando..."
+            tint2 >> "${LOG_DIR}/tint2.log" 2>&1 &
+            TINT2_PID=$!
+            sed -i "s/Tint2:.*/Tint2:${TINT2_PID}/" "${PID_FILE}"
+            sleep 1
+        fi
+    fi
+
+    sleep 5
+done
+
+error "Saliendo del monitor por fallo critico."
 cleanup
