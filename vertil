@@ -1,0 +1,54 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================
+# vertil — Lanzador rapido de Vertil OS desde Termux
+# ============================================================
+# CAPA: TERMUX (obligatorio)
+# PROPOSITO: Entra a Debian y ejecuta vertil-start
+# Uso: ./vertil
+# ============================================================
+
+set -eo pipefail
+
+# Regla: Solo válido si existe $TERMUX_VERSION
+if [ -z "${TERMUX_VERSION:-}" ]; then
+    echo ""
+    echo "  ERROR: Este lanzador solo funciona en Termux."
+    echo ""
+    exit 1
+fi
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME="${HOME:-/data/data/com.termux/files/home}"
+
+# Verificar que Debian esta instalado
+if ! proot-distro list 2>/dev/null | grep -i "debian" | grep -qi "installed"; then
+    echo ""
+    echo "  ERROR: Debian no esta instalado."
+    echo "  Ejecuta primero: bash vertil-build.sh"
+    echo ""
+    exit 1
+fi
+
+# Detectar donde esta vertil-os
+REPO_DIR=""
+if [ -d "${HOME}/vertil-os" ]; then
+    REPO_DIR="${HOME}/vertil-os"
+elif [ -d "$(dirname "$0")" ] && [ -f "$(dirname "$0")/vertil-start" ]; then
+    REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
+else
+    echo ""
+    echo "  ERROR: No se encontro el directorio de Vertil OS."
+    echo "  Clona el repositorio o navega al directorio correcto."
+    echo ""
+    exit 1
+fi
+
+echo ""
+echo "  Iniciando Vertil OS..."
+echo "  Directorio: ${REPO_DIR}"
+echo ""
+
+# Entrar a Debian con el repositorio montado y ejecutar vertil-start
+proot-distro login debian \
+    --bind "${REPO_DIR}":/root/vertil-os \
+    -- bash -c "cd /root/vertil-os && ./vertil-start"
