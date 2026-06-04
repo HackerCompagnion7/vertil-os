@@ -29,13 +29,10 @@ if [ -n "${TERMUX_VERSION:-}" ]; then
     exit 1
 fi
 
-# PROHIBIDO: proot-distro no debe existir ni ejecutarse aqui
+# REGLA CRITICA: SI entorno == Debian Y proot-distro en ejecucion → ABORTAR
+# OUTPUT: [BLOCKED] proot-distro dentro de Debian
 if command -v proot-distro &>/dev/null; then
-    echo ""
-    echo "  ERROR: proot-distro detectado en PATH."
-    echo "  Este script se ejecuta DENTRO de Debian."
-    echo "  No se debe ejecutar proot-distro dentro de proot."
-    echo ""
+    echo "[BLOCKED] proot-distro dentro de Debian"
     exit 1
 fi
 
