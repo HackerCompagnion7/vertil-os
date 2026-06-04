@@ -2,19 +2,60 @@
 # ============================================================
 # vertil-build.sh — Script de instalacion unica para Vertil OS
 # Fase 1: BASE VIVA
-# Debe ejecutarse dentro de Termux en Android (sin root)
+# DEBE ejecutarse dentro de Termux (fuera de cualquier proot)
 # ============================================================
 
 set -e
 
 # ============================================================
-# 1. VERIFICACION DE ENTORNO TERMUX
+# 0. VALORES POR DEFECTO PARA VARIABLES TERMUX
+#    Estas variables existen nativamente en Termux, pero
+#    definimos defaults defensivos para evitar crashes.
 # ============================================================
-if [ -z "$TERMUX_VERSION" ] && [ ! -d "$PREFIX" ]; then
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME="${HOME:-/data/data/com.termux/files/home}"
+
+# ============================================================
+# 1. VERIFICACION DE ENTORNO — CAPA 1: TERMUX OBLIGATORIO
+# ============================================================
+# 1a. Verificar que NO estamos dentro de un proot
+if [ -n "${PROOT:-}" ] || [ -n "${PROOT_TMP:-}" ]; then
     echo ""
-    echo "  ERROR: Este script debe ejecutarse dentro de Termux."
-    echo "  No se detecto \$TERMUX_VERSION ni \$PREFIX."
-    echo "  Descargue Termux desde F-Droid: https://f-droid.org/packages/com.termux/"
+    echo "  ERROR CRITICO: Este script se esta ejecutando dentro de un entorno proot."
+    echo "  vertil-build.sh DEBE ejecutarse en Termux nativo, NO dentro de Debian."
+    echo ""
+    echo "  Salga del entorno proot primero:"
+    echo "    exit"
+    echo ""
+    echo "  Luego ejecute desde Termux:"
+    echo "    bash vertil-build.sh"
+    echo ""
+    exit 1
+fi
+
+# 1b. Verificar que estamos en Termux (variable exclusiva de Termux)
+if [ -z "${TERMUX_VERSION:-}" ]; then
+    # Doble verificacion: buscar binarios caracteristicos de Termux
+    if [ ! -x "${PREFIX}/bin/pkg" ] && [ ! -x "${PREFIX}/bin/apt" ]; then
+        echo ""
+        echo "  ERROR: Este script debe ejecutarse dentro de Termux."
+        echo "  No se detecto \$TERMUX_VERSION ni binarios de Termux."
+        echo "  Descargue Termux desde F-Droid: https://f-droid.org/packages/com.termux/"
+        echo ""
+        exit 1
+    fi
+    # Si llegamos aqui, hay binarios Termux pero no la variable
+    echo "  AVISO: \$TERMUX_VERSION no esta definida, pero se detectaron binarios de Termux."
+    echo "  Continuando con cautela..."
+fi
+
+# 1c. Verificar que proot-distro NO esta ejecutandose actualmente
+#     (previene el error "proot-distro should not be executed under PRoot")
+if [ -f "/.proot-env" ] 2>/dev/null || grep -q "proot" /proc/self/maps 2>/dev/null; then
+    echo ""
+    echo "  ERROR CRITICO: Se detecto que el proceso actual esta bajo proot."
+    echo "  vertil-build.sh no puede ejecutarse dentro de proot."
+    echo "  Salga del entorno proot e intente de nuevo."
     echo ""
     exit 1
 fi
@@ -24,11 +65,15 @@ echo "  ========================================="
 echo "    Vertil OS - Fase 1: Construccion Base"
 echo "  ========================================="
 echo ""
+echo "  Entorno detectado: Termux (OK)"
+echo "  PREFIX: ${PREFIX}"
+echo "  HOME: ${HOME}"
+echo ""
 
 # ============================================================
 # 2. INSTALAR PROOT-DISTRO
 # ============================================================
-echo "[1/7] Verificando proot-distro..."
+echo "[1/8] Verificando proot-distro..."
 if ! command -v proot-distro &>/dev/null; then
     echo "       Instalando proot-distro..."
     pkg install -y proot-distro
@@ -38,19 +83,49 @@ fi
 
 # ============================================================
 # 3. INSTALAR DEBIAN EN PROOT-DISTRO
+#    Usar `proot-distro list` para validacion confiable
+#    en lugar de verificar rutas internas del filesystem.
 # ============================================================
-echo "[2/7] Verificando distribucion Debian..."
-if proot-distro list 2>/dev/null | grep -q "debian.*installed"; then
+echo "[2/8] Verificando distribucion Debian..."
+
+DEBIAN_INSTALLED=false
+# Metodo primario: proot-distro list (mas confiable)
+if proot-distro list 2>/dev/null | grep -qi "debian.*installed"; then
+    DEBIAN_INSTALLED=true
+fi
+# Metodo secundario: verificar directorio rootfs
+ROOTFS="${PREFIX}/var/lib/proot-distro/installed-rootfs/debian"
+if [ -d "${ROOTFS}" ] && [ -d "${ROOTFS}/usr" ]; then
+    DEBIAN_INSTALLED=true
+fi
+
+if [ "${DEBIAN_INSTALLED}" = "true" ]; then
     echo "       Debian ya esta instalado en proot-distro."
 else
     echo "       Instalando Debian (esto puede tardar varios minutos)..."
     proot-distro install debian
+    
+    # Esperar a que el registro se complete
+    echo "       Verificando instalacion..."
+    sleep 3
+    
+    # Verificar que la instalacion tuvo exito
+    if ! proot-distro list 2>/dev/null | grep -qi "debian.*installed"; then
+        echo "  ERROR: La instalacion de Debian no se registro correctamente."
+        echo "  Intentando verificar por directorio rootfs..."
+        if [ ! -d "${ROOTFS}" ] || [ ! -d "${ROOTFS}/usr" ]; then
+            echo "  ERROR: El rootfs no se creo. Intente manualmente:"
+            echo "    proot-distro install debian"
+            exit 1
+        fi
+    fi
+    echo "       Debian instalado correctamente."
 fi
 
 # ============================================================
-# 4. DEFINIR RUTA DEL ROOTFS
+# 4. VALIDAR ROOTFS
 # ============================================================
-ROOTFS="${PREFIX}/var/lib/proot-distro/installed-rootfs/debian"
+echo "[3/8] Validando rootfs de Debian..."
 
 if [ ! -d "${ROOTFS}" ]; then
     echo "  ERROR: El rootfs de Debian no se encuentra en: ${ROOTFS}"
@@ -59,17 +134,33 @@ if [ ! -d "${ROOTFS}" ]; then
     exit 1
 fi
 
-echo "       Rootfs encontrado en: ${ROOTFS}"
+if [ ! -d "${ROOTFS}/usr" ]; then
+    echo "  ERROR: El rootfs de Debian parece incompleto (falta /usr)."
+    echo "  Intente ejecutar: proot-distro install debian"
+    exit 1
+fi
+
+echo "       Rootfs validado en: ${ROOTFS}"
 
 # ============================================================
 # 5. INSTALAR PAQUETES DENTRO DE DEBIAN
+#    Esto se ejecuta via proot-distro login desde Termux.
 # ============================================================
-echo "[3/7] Instalando paquetes dentro de Debian..."
+echo "[4/8] Instalando paquetes dentro de Debian..."
 echo "       (Esto puede tardar unos minutos la primera vez)"
 
 proot-distro login debian -- bash -c '
     export DEBIAN_FRONTEND=noninteractive
+    
+    # Verificar que estamos en Debian y no en Termux
+    if [ ! -f /etc/debian_version ]; then
+        echo "ERROR: No se detecto Debian dentro del proot."
+        exit 1
+    fi
+    
     apt update -y
+    
+    # Instalar paquetes esenciales
     apt install -y \
         xvfb \
         openbox \
@@ -82,15 +173,35 @@ proot-distro login debian -- bash -c '
         adwaita-icon-theme \
         dbus \
         procps \
-        psmisc
+        psmisc \
+        2>&1 | tail -5
+    
+    # Verificar que los paquetes criticos se instalaron
+    for pkg in xvfb openbox x11vnc tint2 xterm; do
+        if ! command -v "$pkg" &>/dev/null; then
+            echo "AVISO: $pkg no se encontro en PATH, verificando en ubicaciones comunes..."
+        fi
+    done
+    
+    echo "INSTALACION_COMPLETADA=1"
 '
+
+# Verificar que x0vncserver o x11vnc se instalaron en el rootfs
+VNC_FOUND=false
+if [ -x "${ROOTFS}/usr/bin/x0vncserver" ] || [ -x "${ROOTFS}/usr/bin/x11vnc" ]; then
+    VNC_FOUND=true
+fi
+if [ "${VNC_FOUND}" = "false" ]; then
+    echo "  AVISO: No se encontro servidor VNC en el rootfs."
+    echo "  El sistema intentara usar x11vnc como fallback al iniciar."
+fi
 
 echo "       Paquetes instalados correctamente."
 
 # ============================================================
 # 6. CREAR CONFIGURACION DE OPENBOX (rc.xml)
 # ============================================================
-echo "[4/7] Configurando Openbox..."
+echo "[5/8] Configurando Openbox..."
 
 mkdir -p "${ROOTFS}/root/.config/openbox"
 
@@ -226,10 +337,7 @@ cat > "${ROOTFS}/root/.config/openbox/rc.xml" << 'OPENBOXRC'
 </openbox_config>
 OPENBOXRC
 
-# ============================================================
 # 6b. CREAR MENU DE OPENBOX (menu.xml)
-# ============================================================
-
 cat > "${ROOTFS}/root/.config/openbox/menu.xml" << 'OPENBOXMENU'
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu xmlns="http://openbox.org/3.4/menu">
@@ -250,7 +358,7 @@ echo "       Openbox configurado (rc.xml + menu.xml)"
 # ============================================================
 # 7. CREAR CONFIGURACION DE TINT2 (tint2rc)
 # ============================================================
-echo "[5/7] Configurando Tint2..."
+echo "[6/8] Configurando Tint2..."
 
 mkdir -p "${ROOTFS}/root/.config/tint2"
 
@@ -349,19 +457,59 @@ echo "       Tint2 configurado (tint2rc + .desktop)"
 
 # ============================================================
 # 8. CREAR SCRIPT VERTIL-START EN $HOME
+#    Este script se ejecuta desde Termux y gestiona proot internamente.
 # ============================================================
-echo "[6/7] Generando script vertil-start..."
+echo "[7/8] Generando script vertil-start..."
 
 cat > "${HOME}/vertil-start" << 'VERTILSTART'
 #!/data/data/com.termux/files/usr/bin/bash
 # ============================================================
 # vertil-start — Script de lanzamiento de Vertil OS Fase 1
-# Se ejecuta desde Termux (fuera del proot)
-# Gestiona el entorno proot internamente.
-# El usuario nunca debe teclear proot-distro login manualmente.
+# ============================================================
+# CAPA: Termux (fuera del proot)
+# PROPOSITO: Lanzar proot-distro con el script interno que
+#            inicia Xvfb, Openbox, Tint2 y VNC.
+# REGLA: El usuario NUNCA debe teclear proot-distro login.
 # ============================================================
 
-set -euo pipefail
+set -eo pipefail
+
+# ============================================================
+# VALORES POR DEFECTO PARA VARIABLES TERMUX
+#    Evita el crash "PREFIX: unbound variable"
+#    Estas variables siempre existen en Termux nativo,
+#    pero las definimos defensivamente.
+# ============================================================
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME="${HOME:-/data/data/com.termux/files/home}"
+
+# ============================================================
+# VERIFICACIONES DE ENTORNO — PRIMERO QUE NADA
+# ============================================================
+
+# 1. Verificar que NO estamos dentro de un proot
+if [ -n "${PROOT:-}" ] || [ -n "${PROOT_TMP:-}" ]; then
+    echo ""
+    echo "  ERROR: Este script se esta ejecutando dentro de un entorno proot."
+    echo "  vertil-start DEBE ejecutarse en Termux nativo."
+    echo ""
+    echo "  Salga del proot primero:"
+    echo "    exit"
+    echo ""
+    echo "  Luego ejecute desde Termux:"
+    echo "    ./vertil-start"
+    echo ""
+    exit 1
+fi
+
+# 2. Verificar que estamos en Termux
+if [ -z "${TERMUX_VERSION:-}" ] && [ ! -x "${PREFIX}/bin/pkg" ]; then
+    echo ""
+    echo "  ERROR: Este script requiere Termux."
+    echo "  No se detecto \$TERMUX_VERSION ni el binario 'pkg'."
+    echo ""
+    exit 1
+fi
 
 # ============================================================
 # CONSTANTES
@@ -448,7 +596,7 @@ cleanup() {
     # visibles desde Termux. Si no fueron limpiados por el script
     # interno, los intentamos matar aqui.
     local stale_procs
-    stale_procs=$(pgrep -f "Xvfb.*${DISPLAY_NUM}" 2>/dev/null || true)
+    stale_procs=$(pgrep -f "Xvfb" 2>/dev/null || true)
     if [ -n "${stale_procs}" ]; then
         info "Limpiando procesos Xvfb residuales..."
         echo "${stale_procs}" | xargs kill 2>/dev/null || true
@@ -466,8 +614,9 @@ cleanup() {
         echo "${stale_procs}" | xargs kill 2>/dev/null || true
     fi
 
-    # 4. Limpiar flag de listo
+    # 4. Limpiar archivos de estado
     rm -f "${READY_FLAG}"
+    rm -f "${ROOTFS}/root/.vertil/ready" 2>/dev/null || true
 
     info "Limpieza completada. Vertil OS detenido."
     exit 0
@@ -477,48 +626,90 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # ============================================================
-# VERIFICAR QUE EL ROOTFS EXISTE
+# VERIFICAR QUE EL ROOTFS EXISTE (validacion robusta)
 # ============================================================
 info "Verificando entorno..."
 
-if [ ! -d "${ROOTFS}" ]; then
-    error "No se encontro el rootfs de Debian en: ${ROOTFS}"
+# Metodo 1: Verificar via proot-distro list (mas confiable)
+DEBIAN_READY=false
+if command -v proot-distro &>/dev/null; then
+    if proot-distro list 2>/dev/null | grep -qi "debian.*installed"; then
+        DEBIAN_READY=true
+    fi
+fi
+
+# Metodo 2: Verificar directorio rootfs directamente
+if [ "${DEBIAN_READY}" = "false" ] && [ -d "${ROOTFS}" ] && [ -d "${ROOTFS}/usr" ]; then
+    DEBIAN_READY=true
+fi
+
+if [ "${DEBIAN_READY}" = "false" ]; then
+    error "No se encontro una instalacion de Debian valida."
+    error "  proot-distro list no muestra Debian como instalado."
+    error "  Rootfs esperado en: ${ROOTFS}"
+    error ""
     error "Ejecute primero: bash vertil-build.sh"
     exit 1
 fi
 
-if [ ! -f "${ROOTFS}/usr/bin/Xvfb" ]; then
-    error "Xvfb no encontrado en el rootfs."
+# Verificar que los binarios criticos existen en el rootfs
+CRITICAL_MISSING=""
+for binary in Xvfb openbox xterm; do
+    if [ ! -x "${ROOTFS}/usr/bin/${binary}" ]; then
+        CRITICAL_MISSING="${CRITICAL_MISSING} ${binary}"
+    fi
+done
+
+if [ -n "${CRITICAL_MISSING}" ]; then
+    error "Faltan binarios criticos en el rootfs:${CRITICAL_MISSING}"
     error "Los paquetes pueden no haberse instalado correctamente."
     error "Ejecute nuevamente: bash vertil-build.sh"
     exit 1
 fi
 
-info "Rootfs de Debian verificado."
+# Verificar que al menos un servidor VNC esta disponible
+VNC_SERVER=""
+if [ -x "${ROOTFS}/usr/bin/x0vncserver" ]; then
+    VNC_SERVER="x0vncserver"
+elif [ -x "${ROOTFS}/usr/bin/x11vnc" ]; then
+    VNC_SERVER="x11vnc"
+else
+    error "No se encontro ningun servidor VNC en el rootfs."
+    error "Se necesita x0vncserver o x11vnc."
+    error "Ejecute nuevamente: bash vertil-build.sh"
+    exit 1
+fi
+
+info "Entorno validado: Debian instalado, VNC server: ${VNC_SERVER}"
 
 # ============================================================
 # LIMPIAR ESTADO ANTERIOR
 # ============================================================
 rm -f "${READY_FLAG}"
 rm -f "${PID_FILE}"
+rm -f "${ROOTFS}/root/.vertil/ready" 2>/dev/null || true
 
 # ============================================================
 # GENERAR SCRIPT INTERNO (se ejecuta dentro del proot)
-# Este script inicia Xvfb, Openbox, Tint2 y VNC.
-# Se genera dinamicamente en cada ejecucion para asegurar
-# que los valores de configuracion esten actualizados.
+# Este script se ejecuta en CAPA DEBIAN (dentro de proot).
+# NO usa variables de Termux ($PREFIX, $TERMUX_VERSION, etc.)
 # ============================================================
 info "Preparando entorno interno..."
+
+mkdir -p "${ROOTFS}/root/.vertil/logs"
 
 cat > "${ROOTFS}${INNER_SCRIPT}" << 'INNERSCRIPT'
 #!/bin/bash
 # ============================================================
 # vertil-inner.sh — Script interno de Vertil OS
-# Se ejecuta dentro del entorno proot/Debian.
-# Inicia todos los servicios graficos y los monitorea.
+# CAPA: Debian (dentro del entorno proot)
+# ============================================================
+# REGLA CRITICA: Este script se ejecuta dentro de Debian/proot.
+# NO usar variables de Termux ($PREFIX, $TERMUX_VERSION, etc.)
+# Todas las variables deben ser definidas localmente.
 # ============================================================
 
-# --- Constantes internas ---
+# --- Constantes internas (definidas aqui, sin depender de Termux) ---
 INNER_DISPLAY=":0"
 INNER_RESOLUTION="1280x720x24"
 INNER_VNC_PORT="5901"
@@ -635,28 +826,42 @@ echo "Tint2:${TINT2_PID}" >> "${INNER_PID_FILE}"
 sleep 1
 if ! kill -0 "${TINT2_PID}" 2>/dev/null; then
     inner_info "AVISO: Tint2 no pudo iniciarse (no critico para Fase 1)"
-    # No abortamos; el escritorio sigue funcional sin la barra
 else
     inner_info "Tint2 iniciado (PID ${TINT2_PID})"
 fi
 
 # ============================================================
 # 5. INICIAR SERVIDOR VNC
+#    Intenta x0vncserver primero; si falla, usa x11vnc.
 # ============================================================
-inner_info "Iniciando servidor VNC (x0vncserver) en puerto ${INNER_VNC_PORT}..."
+VNC_STARTED=false
 
-x0vncserver \
-    -display "${INNER_DISPLAY}" \
-    -rfbport "${INNER_VNC_PORT}" \
-    -SecurityTypes None \
-    >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
-VNC_PID=$!
-echo "VNC:${VNC_PID}" >> "${INNER_PID_FILE}"
+# Intento 1: x0vncserver (TigerVNC)
+if command -v x0vncserver &>/dev/null; then
+    inner_info "Iniciando x0vncserver en puerto ${INNER_VNC_PORT}..."
 
-sleep 2
-if ! kill -0 "${VNC_PID}" 2>/dev/null; then
-    inner_error "x0vncserver no pudo iniciarse. Intentando x11vnc como fallback..."
-    
+    x0vncserver \
+        -display "${INNER_DISPLAY}" \
+        -rfbport "${INNER_VNC_PORT}" \
+        -SecurityTypes None \
+        >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
+    VNC_PID=$!
+    echo "VNC:${VNC_PID}" >> "${INNER_PID_FILE}"
+
+    sleep 2
+    if kill -0 "${VNC_PID}" 2>/dev/null; then
+        inner_info "x0vncserver iniciado (PID ${VNC_PID})"
+        VNC_STARTED=true
+    else
+        inner_info "x0vncserver fallo, intentando x11vnc como fallback..."
+        sed -i "/^VNC:/d" "${INNER_PID_FILE}"
+    fi
+fi
+
+# Intento 2: x11vnc (fallback universal)
+if [ "${VNC_STARTED}" = "false" ] && command -v x11vnc &>/dev/null; then
+    inner_info "Iniciando x11vnc en puerto ${INNER_VNC_PORT}..."
+
     x11vnc \
         -display "${INNER_DISPLAY}" \
         -rfbport "${INNER_VNC_PORT}" \
@@ -667,19 +872,21 @@ if ! kill -0 "${VNC_PID}" 2>/dev/null; then
         -noxdamage \
         >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
     VNC_PID=$!
-    # Actualizar PID en archivo
-    sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${INNER_PID_FILE}"
-    
+    echo "VNC:${VNC_PID}" >> "${INNER_PID_FILE}"
+
     sleep 2
-    if ! kill -0 "${VNC_PID}" 2>/dev/null; then
-        inner_error "Ni x0vncserver ni x11vnc pudieron iniciarse."
-        inner_error "Ver ${INNER_LOG_DIR}/vnc.log para detalles."
-        inner_cleanup
-        exit 1
+    if kill -0 "${VNC_PID}" 2>/dev/null; then
+        inner_info "x11vnc iniciado (PID ${VNC_PID})"
+        VNC_STARTED=true
     fi
-    inner_info "x11vnc iniciado como fallback (PID ${VNC_PID})"
-else
-    inner_info "x0vncserver iniciado (PID ${VNC_PID})"
+fi
+
+# Verificar que ALGUN servidor VNC arranco
+if [ "${VNC_STARTED}" = "false" ]; then
+    inner_error "Ningun servidor VNC pudo iniciarse."
+    inner_error "Ver ${INNER_LOG_DIR}/vnc.log para detalles."
+    inner_cleanup
+    exit 1
 fi
 
 # ============================================================
@@ -694,41 +901,46 @@ inner_info "Todos los servicios estan en ejecucion. Flag de listo escrito."
 inner_info "Monitoreando servicios... (Ctrl+C para detener)"
 
 while true; do
-    # Verificar procesos criticos
+    # Verificar proceso critico: Xvfb
     if ! kill -0 "${XVFB_PID}" 2>/dev/null; then
         inner_error "Xvfb ha muerto inesperadamente. Deteniendo sistema."
         break
     fi
     
+    # Auto-reinicio: Openbox
     if ! kill -0 "${OPENBOX_PID}" 2>/dev/null; then
-        inner_error "Openbox ha muerto inesperadamente. Intentando reiniciar..."
+        inner_info "Openbox ha muerto. Reiniciando..."
         openbox >> "${INNER_LOG_DIR}/openbox.log" 2>&1 &
         OPENBOX_PID=$!
         sed -i "s/Openbox:.*/Openbox:${OPENBOX_PID}/" "${INNER_PID_FILE}"
         sleep 1
     fi
     
+    # Auto-reinicio: VNC
     if ! kill -0 "${VNC_PID}" 2>/dev/null; then
-        inner_info "VNC ha muerto, intentando reiniciar con x11vnc..."
-        x11vnc \
-            -display "${INNER_DISPLAY}" \
-            -rfbport "${INNER_VNC_PORT}" \
-            -nopw \
-            -forever \
-            -shared \
-            -noxrecord \
-            -noxdamage \
-            >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
-        VNC_PID=$!
-        sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${INNER_PID_FILE}"
-        sleep 1
+        inner_info "VNC ha muerto. Reiniciando con x11vnc..."
+        if command -v x11vnc &>/dev/null; then
+            x11vnc \
+                -display "${INNER_DISPLAY}" \
+                -rfbport "${INNER_VNC_PORT}" \
+                -nopw \
+                -forever \
+                -shared \
+                -noxrecord \
+                -noxdamage \
+                >> "${INNER_LOG_DIR}/vnc.log" 2>&1 &
+            VNC_PID=$!
+            sed -i "s/VNC:.*/VNC:${VNC_PID}/" "${INNER_PID_FILE}"
+            sleep 1
+        else
+            inner_error "VNC murio y x11vnc no esta disponible. Deteniendo."
+            break
+        fi
     fi
     
-    # Tint2 es no-critico; si muere, intentamos reiniciar
-    if [ -n "${TINT2_PID:-}" ] && kill -0 "${TINT2_PID}" 2>/dev/null; then
-        : # tint2 sigue corriendo, todo bien
-    else
-        inner_info "Reiniciando Tint2..."
+    # Auto-reinicio: Tint2 (no critico)
+    if [ -n "${TINT2_PID:-}" ] && ! kill -0 "${TINT2_PID}" 2>/dev/null; then
+        inner_info "Tint2 ha muerto. Reiniciando..."
         tint2 >> "${INNER_LOG_DIR}/tint2.log" 2>&1 &
         TINT2_PID=$!
         sed -i "s/Tint2:.*/Tint2:${TINT2_PID}/" "${INNER_PID_FILE}"
@@ -768,21 +980,33 @@ info "Sesion proot iniciada (PID ${PROOT_PID})"
 
 # ============================================================
 # ESPERAR A QUE EL SISTEMA ESTE LISTO
+#    Espera a que el script interno escriba el flag de listo.
+#    Lee directamente del rootfs (accesible desde Termux).
 # ============================================================
 info "Esperando a que los servicios internos se inicien..."
 
-TIMEOUT=30
+TIMEOUT=45
 ELAPSED=0
 READY=false
 
 while [ ${ELAPSED} -lt ${TIMEOUT} ]; do
+    # Verificar que el proceso proot sigue vivo
+    if ! kill -0 "${PROOT_PID}" 2>/dev/null; then
+        error "El proceso proot ha muerto prematuramente."
+        error "Verifique los logs en ${ROOTFS}/root/.vertil/logs/"
+        tail -20 "${ROOTFS}/root/.vertil/logs/inner.log" 2>/dev/null || true
+        cleanup
+        exit 1
+    fi
+    
+    # Verificar flag de listo
     if [ -f "${ROOTFS}/root/.vertil/ready" ]; then
         READY=true
         break
     fi
+    
     sleep 1
     ELAPSED=$((ELAPSED + 1))
-    # Mostrar progreso cada 5 segundos
     if [ $((ELAPSED % 5)) -eq 0 ]; then
         info "Esperando... (${ELAPSED}s / ${TIMEOUT}s)"
     fi
@@ -795,7 +1019,7 @@ if [ "${READY}" != "true" ]; then
     # Verificar si el proceso proot sigue vivo
     if kill -0 "${PROOT_PID}" 2>/dev/null; then
         error "El proceso proot sigue vivo pero los servicios no arrancaron."
-        error "Intentando mostrar los ultimas lineas del log interno..."
+        error "Ultimas lineas del log interno:"
         tail -20 "${ROOTFS}/root/.vertil/logs/inner.log" 2>/dev/null || true
     fi
     
@@ -809,21 +1033,17 @@ info "Servicios internos iniciados correctamente."
 # MOSTRAR INFORMACION DE CONEXION
 # ============================================================
 
-# Intentar obtener la IP local del dispositivo
+# Obtener IP local
 LOCAL_IP=""
-# Metodo 1: comando ip
 if command -v ip &>/dev/null; then
     LOCAL_IP=$(ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
 fi
-# Metodo 2: ifconfig
 if [ -z "${LOCAL_IP}" ] && command -v ifconfig &>/dev/null; then
     LOCAL_IP=$(ifconfig 2>/dev/null | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}' | sed 's/addr://')
 fi
-# Metodo 3: hostname
 if [ -z "${LOCAL_IP}" ]; then
     LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 fi
-# Fallback
 if [ -z "${LOCAL_IP}" ]; then
     LOCAL_IP="localhost"
 fi
@@ -858,8 +1078,6 @@ fi
 # ============================================================
 info "Vertil OS en ejecucion. Presione Ctrl+C para detener."
 
-# Esperar al proceso proot. Cuando reciba SIGINT,
-# la funcion cleanup() se ejecutara automaticamente.
 wait "${PROOT_PID}" 2>/dev/null || true
 
 # Si llegamos aqui, el proceso proot termino por si solo
@@ -875,7 +1093,7 @@ echo "       Script vertil-start creado en ${HOME}/vertil-start"
 # ============================================================
 # 9. INSTALAR QRENCODE EN TERMUX (OPCIONAL)
 # ============================================================
-echo "[7/7] Verificando qrencode en Termux..."
+echo "[8/8] Verificando qrencode en Termux..."
 if ! command -v qrencode &>/dev/null; then
     echo "       Instalando qrencode para generar codigos QR..."
     pkg install -y qrencode 2>/dev/null || echo "       (No se pudo instalar qrencode, es opcional)"
@@ -891,11 +1109,14 @@ echo -e "\033[0;32m  =========================================\033[0m"
 echo -e "\033[0;32m   Vertil OS Fase 1 - Construccion lista\033[0m"
 echo -e "\033[0;32m  =========================================\033[0m"
 echo ""
-echo "  Para iniciar Vertil OS, ejecute:"
+echo "  Para iniciar Vertil OS, ejecute DESDE TERMUX:"
 echo ""
 echo "      ${HOME}/vertil-start"
 echo ""
 echo "  Luego conecte su cliente VNC a localhost:5901"
 echo ""
 echo "  Cliente VNC recomendado: bVNC (disponible en F-Droid)"
+echo ""
+echo "  IMPORTANTE: vertil-start DEBE ejecutarse en Termux,"
+echo "  NO dentro de proot-distro login debian."
 echo ""
