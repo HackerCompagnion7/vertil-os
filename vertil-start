@@ -139,8 +139,19 @@ trap cleanup SIGINT SIGTERM
 > "${PID_FILE}"
 
 # ============================================================
-# 6. PREPARAR ENTORNO X11
+# 6. MATAR PROCESOS PREVIOS + PREPARAR ENTORNO X11
 # ============================================================
+
+# Matar cualquier x11vnc previo que pudiera estar corriendo
+pkill -f x11vnc 2>/dev/null || true
+
+# Deshabilitar MIT-SHM en todo el entorno
+# /dev/shm NO funciona en proot — esto fuerza XGetImage en
+# x11vnc y cualquier app X11 que intente usar shared memory
+export QT_X11_NO_MITSHM=1
+export _X11_NO_MITSHM=1
+export _MITSHM=0
+
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix 2>/dev/null || true
 mkdir -p /root/.vnc
