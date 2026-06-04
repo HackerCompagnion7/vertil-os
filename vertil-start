@@ -5,7 +5,13 @@
 # CAPA: DEBIAN (obligatorio)
 # PROPOSITO: Iniciar Xvfb, Openbox, Tint2 y VNC
 # REGLA: Solo se ejecuta en Debian/proot. Aborta si detecta Termux.
-# PROHIBIDO: proot-distro, $PREFIX, variables de Termux
+# DETECCION DE ENTORNO: $TERMUX_VERSION
+#   - Existe  → Termux → ABORTAR
+#   - No existe → Debian → CONTINUAR
+# NOTA: proot-distro login hereda PATH de Termux, asi que
+#   command -v proot-distro retorna true DENTRO de Debian.
+#   Eso NO significa que estemos en Termux. Solo $TERMUX_VERSION
+#   es confiable para detectar la capa.
 # PROHIBIDO: x0vncserver (incompatible con Xvfb)
 # VNC: Solo x11vnc (compatible con display virtual Xvfb)
 # ============================================================
@@ -16,7 +22,9 @@ set -eo pipefail
 # 1. VERIFICACION DE ENTORNO — DEBIAN OBLIGATORIO
 # ============================================================
 
-# Regla: Solo valido si NO existe $TERMUX_VERSION
+# UNICA verificacion confiable: $TERMUX_VERSION
+# - Existe = estamos en Termux → ABORTAR
+# - No existe = estamos en Debian/proot → CONTINUAR
 if [ -n "${TERMUX_VERSION:-}" ]; then
     echo ""
     echo "  ERROR: Se detecto \$TERMUX_VERSION."
@@ -28,12 +36,6 @@ if [ -n "${TERMUX_VERSION:-}" ]; then
     echo "  O usa el lanzador rapido:"
     echo "    ./vertil"
     echo ""
-    exit 1
-fi
-
-# REGLA CRITICA: SI entorno == Debian Y proot-distro en ejecucion → ABORTAR
-if command -v proot-distro &>/dev/null; then
-    echo "[BLOCKED] proot-distro dentro de Debian"
     exit 1
 fi
 
